@@ -321,6 +321,9 @@ hooks = {name: getattr(gui_hooks, name) for name in HOOK_NAMES}
 hooks["main_window_did_init"].run()
 hooks["profile_did_open"].run(None)
 
+# 测试里绝不许联网：把更新仓库改成占位符，启动时那次「悄悄检查更新」就会直接返回
+mod.UPDATE_REPO = "TODO/no-network-in-tests"
+
 
 # ------------------------------------------------------------------ 题型
 ok("P1 ensure_choice_note_type 成功", mod.ensure_choice_note_type() is True)
@@ -762,6 +765,10 @@ mod.UPDATE_REPO = _saved_repo
 
 _saved_newer = mod.check_for_update
 mod.UPDATE_REPO = "someone/some-repo"
+try:
+    mod.UPDATE_STATE_PATH.unlink()  # 清掉「一天只查一次」的计时，保证这一项可复现
+except Exception:
+    pass
 mw.addonManager.cfg = {"update_check": False}
 mod._config_cache = None
 _called = {"n": 0}
@@ -775,6 +782,21 @@ eq("P139 开着开关会查一次", _called["n"], 1)
 mw.addonManager.cfg = cw
 mod._config_cache = None
 mod.check_for_update = _saved_newer
+mod.UPDATE_REPO = _saved_repo
+
+# ------------------------------------------------------------------ 更新提示里的 Release 链接
+mod.UPDATE_REPO = "someone/some-repo"
+eq(
+    "P140 Release 链接自动补 v 前缀",
+    mod.update_release_url("1.0.2"),
+    "https://github.com/someone/some-repo/releases/tag/v1.0.2",
+)
+ok("P141 已经是 v 前缀就不重复加", mod.update_release_url("v1.2.0").endswith("/tag/v1.2.0"))
+_prompt = mod.update_prompt_text("9.9.9")
+ok("P142 提示里有新版本号", "9.9.9" in _prompt, _prompt)
+ok("P143 提示里有当前版本号", mod.__version__ in _prompt, _prompt)
+ok("P144 提示里有 Release 链接", "/releases/tag/v9.9.9" in _prompt, _prompt)
+ok("P145 提示里问要不要装", "现在下载并安装吗" in _prompt, _prompt)
 mod.UPDATE_REPO = _saved_repo
 
 print("\n".join(results))

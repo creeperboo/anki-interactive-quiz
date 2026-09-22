@@ -37,7 +37,7 @@ STATS_DB_PATH = USER_FILES_DIR / "stats.db"
 # 版本 & 从 GitHub 检查更新
 # --------------------------------------------------------------------------
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # 更新检查从这里拉：https://github.com/creeperboo/anki-interactive-quiz
 UPDATE_REPO = "creeperboo/anki-interactive-quiz"
@@ -46,6 +46,7 @@ VERSION_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/
 PACKAGE_URL = (
     f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/interactive_quiz.ankiaddon"
 )
+RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases"
 UPDATE_STATE_PATH = USER_FILES_DIR / "update.json"
 UPDATE_INTERVAL_SECONDS = 86400  # 启动时最多一天查一次
 
@@ -1627,6 +1628,29 @@ def fetch_latest_version() -> str:
     return _fetch(VERSION_URL, timeout=8).decode("utf-8", "replace").strip()
 
 
+def update_release_url(latest: str) -> str:
+    """新版本对应的 Release 页面（标签按 v1.2.3 约定，取不到就退回仓库 releases 页）。
+
+    这里每次都从 UPDATE_REPO 现算，不缓存到模块常量——否则改了仓库地址这个 URL 不会跟着变。
+    """
+    if not _repo_ready():
+        return ""
+    base = f"https://github.com/{UPDATE_REPO}/releases"
+    tag = latest.strip()
+    if tag and not tag.startswith("v"):
+        tag = "v" + tag
+    return f"{base}/tag/{tag}" if tag else base
+
+
+def update_prompt_text(latest: str) -> str:
+    """更新提示的正文（单独抽出来，方便测试）。"""
+    text = f"互动答题卡有新版本：{latest}（当前 {__version__}）"
+    url = update_release_url(latest)
+    if url:
+        text += f"\n\n这次改了什么：{url}"
+    return text + "\n\n现在下载并安装吗？装完要重启 Anki 才生效。"
+
+
 def _update_state() -> dict[str, Any]:
     try:
         data = json.loads(UPDATE_STATE_PATH.read_text(encoding="utf-8"))
@@ -1709,10 +1733,7 @@ def check_for_update(silent: bool = False) -> None:
             if not silent:
                 tooltip(f"互动答题卡：已经是最新版本（{__version__}）")
             return
-        if not askUser(
-            f"互动答题卡有新版本：{latest}（当前 {__version__}）\n\n"
-            "现在下载并安装吗？装完要重启 Anki 才生效。"
-        ):
+        if not askUser(update_prompt_text(latest)):
             return
         try:
             if download_and_install_update():

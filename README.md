@@ -12,6 +12,8 @@
 
 ## English (short version)
 
+> Full English documentation: **[README.en.md](README.en.md)**
+
 **Interactive Quiz Cards for Anki (desktop add-on)** — answer multiple-choice / true-false / cloze questions directly on the review screen.
 
 - Three independent note types: **choice** (single & multi), **true→false**, **cloze** (`{{c1::...}}`, one card per deletion)
