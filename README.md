@@ -10,6 +10,23 @@
 
 ---
 
+## English (short version)
+
+**Interactive Quiz Cards for Anki (desktop add-on)** — answer multiple-choice / true-false / cloze questions directly on the review screen.
+
+- Three independent note types: **choice** (single & multi), **true→false**, **cloze** (`{{c1::...}}`, one card per deletion)
+- Authoring is checkbox-based: each option is its own input box with a "correct" checkbox (`Enter` adds a row, `Backspace` on an empty row removes it, `Alt+↑/↓` reorders, `Alt+<n>` toggles the n-th option). No `*` syntax to remember.
+- Grading: wrong or "I don't know" → forced **Again** (keyboard `3` and the bottom bar are overridden too); correct → you choose Hard / Good / Easy
+- Per-card answer statistics with deck / type / tag / time / keyword filters, sortable by difficulty
+- Mobile (AnkiDroid / AnkiMobile / AnkiWeb): the card detects that no desktop add-on is present and switches to *self-test + rate yourself with 1-4* mode — no dead buttons
+- Checks GitHub for updates (Tools → 互动答题卡：设置与统计… → 检查更新)
+
+**Install**: download `interactive_quiz.ankiaddon` → Anki → *Tools → Add-ons → Install from file* → restart Anki. Three note types are created automatically.
+
+Slides and docs below are in Chinese (this is a personal study tool).
+
+---
+
 ## 三个题型（各自独立，字段也各自独立）
 
 | 题型 | 用途 | 编辑器里长什么样 |
