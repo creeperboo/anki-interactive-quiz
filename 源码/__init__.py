@@ -1594,14 +1594,31 @@ def _repo_ready() -> bool:
     return bool(UPDATE_REPO) and "TODO" not in UPDATE_REPO
 
 
-def _fetch(url: str, timeout: int = 10) -> bytes:
+def _fetch(url: str, timeout: int = 10, retries: int = 2) -> bytes:
+    """下载一个小文件；分块读 + 失败重试（raw.githubusercontent 偶尔会卡住）。"""
     import urllib.request
 
-    request = urllib.request.Request(
-        url, headers={"User-Agent": f"anki-interactive-quiz/{__version__}"}
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read()
+    last_error: Optional[BaseException] = None
+    for attempt in range(retries + 1):
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": f"anki-interactive-quiz/{__version__}"}
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                chunks: list[bytes] = []
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except Exception as exc:
+            last_error = exc
+            print(f"[互动答题卡] 下载失败（第 {attempt + 1} 次）: {exc}")
+            time.sleep(1.0 + attempt)
+    if last_error is not None:
+        raise last_error
+    return b""
 
 
 def fetch_latest_version() -> str:
@@ -1627,28 +1644,43 @@ def _save_update_state(state: dict[str, Any]) -> None:
 
 
 def download_and_install_update() -> bool:
-    """下载最新的 .ankiaddon 并让 Anki 装上。"""
+    """下载最新的 .ankiaddon 并让 Anki 装上。
+
+    Anki 26.9.2 的接口是：
+        AddonManager.install(file: IO | str, manifest=None, force_enable=False)
+    返回 InstallOk 或 InstallError，靠类型名区分成功与否。
+    """
     import tempfile
 
-    data = _fetch(PACKAGE_URL, timeout=60)
+    data = _fetch(PACKAGE_URL, timeout=90)
     target = Path(tempfile.gettempdir()) / "interactive_quiz_update.ankiaddon"
     target.write_bytes(data)
 
     manager = getattr(mw, "addonManager", None)
-    for name in ("installFromFile", "install_from_file"):
-        fn = getattr(manager, name, None) if manager is not None else None
-        if not callable(fn):
-            continue
+    install = getattr(manager, "install", None)
+    result: Any = None
+    if callable(install):
         try:
-            fn(str(target))
-            return True
+            result = install(str(target))
         except Exception as exc:
-            print(f"[互动答题卡] 调用 {name} 安装失败: {exc}")
+            print(f"[互动答题卡] 调用 addonManager.install 失败: {exc}")
+            result = exc
+    if result is not None and "Error" not in type(result).__name__ and not isinstance(result, Exception):
+        return True
 
+    detail = ""
+    if result is not None:
+        for attr in ("error", "message", "text", "reason"):
+            value = getattr(result, attr, None)
+            if value:
+                detail = f"\n\n{value}"
+                break
+        if not detail and not isinstance(result, Exception):
+            detail = f"\n\n{result!r}"
     showInfo(
         "互动答题卡：新版已经下载好了，但自动安装没成功。\n\n"
-        f"文件在：{target}\n"
-        "请用「工具 → 插件 → 从文件安装」选它，然后重启 Anki。"
+        f"文件在：{target}"
+        "请用「工具 → 插件 → 从文件安装」选它，然后重启 Anki。" + detail
     )
     return False
 
