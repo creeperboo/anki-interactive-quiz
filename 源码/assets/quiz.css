@@ -1,0 +1,450 @@
+/* =====================================================================
+ * 互动答题卡 · 样式
+ * ===================================================================== */
+
+.iq-card {
+  --iq-fg: #1f2328;
+  --iq-muted: #6b7280;
+  --iq-line: #d8dee6;
+  --iq-panel: #f7f8fa;
+  --iq-panel-2: #eef1f5;
+  --iq-accent: #3b6ef6;
+  --iq-ok: #1a9c5b;
+  --iq-ok-bg: #e7f7ee;
+  --iq-no: #d64545;
+  --iq-no-bg: #fdecec;
+  --iq-hard: #b26a00;
+  --iq-good: #1a9c5b;
+  --iq-easy: #2f6df6;
+  --iq-radius: 12px;
+  position: relative;
+  font-size: 16px;
+  color: var(--iq-fg);
+  line-height: 1.6;
+  max-width: 46rem;
+  margin: 0 auto;
+  text-align: left;
+}
+
+.nightMode .iq-card,
+.night_mode .iq-card {
+  --iq-fg: #e8eaed;
+  --iq-muted: #9aa2ad;
+  --iq-line: #3a3f46;
+  --iq-panel: #26292e;
+  --iq-panel-2: #2f3339;
+  --iq-accent: #6f97ff;
+  --iq-ok: #55c98c;
+  --iq-ok-bg: #1d3a2b;
+  --iq-no: #f08a8a;
+  --iq-no-bg: #3d2323;
+  --iq-hard: #e0a34a;
+  --iq-good: #55c98c;
+  --iq-easy: #7aa5ff;
+}
+
+.iq-question {
+  font-size: 1.15em;
+  line-height: 1.7;
+  margin: 0 0 1.1em 0;
+}
+
+.iq-question img {
+  max-width: 100%;
+}
+
+/* ---------- 选项 ---------- */
+.iq-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+  margin-bottom: 0.9em;
+}
+
+.iq-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65em;
+  padding: 0.6em 0.8em;
+  border: 1.5px solid var(--iq-line);
+  border-radius: var(--iq-radius);
+  background: var(--iq-panel);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, transform 0.06s ease;
+  user-select: none;
+}
+
+.iq-opt:hover {
+  border-color: var(--iq-accent);
+}
+
+.iq-opt:active {
+  transform: scale(0.995);
+}
+
+.iq-opt:focus-visible {
+  outline: 2px solid var(--iq-accent);
+  outline-offset: 1px;
+}
+
+.iq-opt.iq-locked {
+  cursor: default;
+}
+
+.iq-opt-key {
+  flex: 0 0 auto;
+  min-width: 1.6em;
+  height: 1.6em;
+  line-height: 1.6em;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--iq-panel-2);
+  color: var(--iq-muted);
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.iq-opt.iq-sel {
+  border-color: var(--iq-accent);
+  background: var(--iq-panel-2);
+  background: color-mix(in srgb, var(--iq-accent) 12%, var(--iq-panel));
+}
+
+.iq-opt.iq-sel .iq-opt-key {
+  background: var(--iq-accent);
+  color: #fff;
+}
+
+.iq-opt.iq-correct {
+  border-color: var(--iq-ok);
+  background: var(--iq-ok-bg);
+}
+
+.iq-opt.iq-correct .iq-opt-key {
+  background: var(--iq-ok);
+  color: #fff;
+}
+
+.iq-opt.iq-wrong {
+  border-color: var(--iq-no);
+  background: var(--iq-no-bg);
+}
+
+.iq-opt.iq-wrong .iq-opt-key {
+  background: var(--iq-no);
+  color: #fff;
+}
+
+.iq-opt-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* ---------- 填空 ---------- */
+.iq-blank {
+  display: inline-block;
+  margin: 0 0.15em;
+  vertical-align: baseline;
+}
+
+.iq-input {
+  font: inherit;
+  font-size: 0.98em;
+  color: var(--iq-fg);
+  background: var(--iq-panel);
+  border: 1.5px solid var(--iq-line);
+  border-bottom-width: 2px;
+  border-radius: 8px;
+  padding: 0.1em 0.45em;
+  min-width: 3.5em;
+  text-align: center;
+}
+
+.iq-input:focus {
+  outline: none;
+  border-color: var(--iq-accent);
+  background: var(--iq-panel-2);
+}
+
+.iq-input.iq-input-ok {
+  border-color: var(--iq-ok);
+  background: var(--iq-ok-bg);
+  color: var(--iq-ok);
+  font-weight: 600;
+}
+
+.iq-input.iq-input-no {
+  border-color: var(--iq-no);
+  background: var(--iq-no-bg);
+  color: var(--iq-no);
+  font-weight: 600;
+}
+
+.iq-blank-filled {
+  padding: 0 0.4em;
+  border-bottom: 2px solid var(--iq-ok);
+  color: var(--iq-ok);
+  font-weight: 600;
+}
+
+.iq-blank-extra {
+  margin-top: 0.7em;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6em;
+}
+
+/* ---------- 按钮 ---------- */
+.iq-controls,
+.iq-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55em;
+  margin-top: 0.9em;
+}
+
+.iq-controls[hidden],
+.iq-actions[hidden],
+.iq-feedback[hidden] {
+  display: none;
+}
+
+.iq-btn {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.5em 1.1em;
+  border-radius: var(--iq-radius);
+  border: 1.5px solid var(--iq-line);
+  background: var(--iq-panel);
+  color: var(--iq-fg);
+  cursor: pointer;
+}
+
+.iq-btn:hover:not(:disabled) {
+  border-color: var(--iq-accent);
+}
+
+.iq-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.iq-submit {
+  background: var(--iq-accent);
+  border-color: var(--iq-accent);
+  color: #fff;
+}
+
+.iq-dontknow {
+  background: transparent;
+  color: var(--iq-muted);
+}
+
+.iq-grade {
+  flex: 1 1 0;
+  min-width: 6.5em;
+  font: inherit;
+  padding: 0.55em 0.8em;
+  border-radius: var(--iq-radius);
+  border: 2px solid currentColor;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1em;
+  line-height: 1.25;
+}
+
+.iq-grade-sub {
+  font-size: 0.72em;
+  opacity: 0.75;
+  font-weight: 500;
+}
+
+.iq-grade-main {
+  font-weight: 700;
+}
+
+.iq-hard {
+  color: var(--iq-hard);
+}
+
+.iq-good {
+  color: var(--iq-good);
+}
+
+.iq-easy {
+  color: var(--iq-easy);
+}
+
+.iq-again {
+  color: var(--iq-no);
+}
+
+.iq-grade:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.iq-grade.iq-chosen:disabled {
+  opacity: 1;
+  background: currentColor;
+}
+
+.iq-grade.iq-chosen:disabled .iq-grade-main,
+.iq-grade.iq-chosen:disabled .iq-grade-sub {
+  color: #fff;
+}
+
+/* ---------- 手机模式（没有插件通道时） ---------- */
+.iq-manual {
+  margin-top: 0.9em;
+  padding: 0.6em 0.8em;
+  border: 1.5px dashed var(--iq-line);
+  border-radius: var(--iq-radius);
+  background: var(--iq-panel);
+}
+
+.iq-manual-main {
+  font-weight: 600;
+}
+
+.iq-manual-sub {
+  margin-top: 0.2em;
+  font-size: 0.88em;
+  color: var(--iq-muted);
+}
+
+/* ---------- 反馈 ---------- */
+.iq-feedback {
+  margin-top: 1em;
+  padding: 0.85em 1em;
+  border-radius: var(--iq-radius);
+  border: 1.5px solid var(--iq-line);
+  background: var(--iq-panel);
+}
+
+.iq-feedback.iq-ok {
+  border-color: var(--iq-ok);
+  background: var(--iq-ok-bg);
+}
+
+.iq-feedback.iq-no {
+  border-color: var(--iq-no);
+  background: var(--iq-no-bg);
+}
+
+.iq-feedback.iq-warn {
+  border-color: var(--iq-hard);
+  background: color-mix(in srgb, var(--iq-hard) 12%, transparent);
+}
+
+.iq-verdict {
+  font-weight: 700;
+  margin-bottom: 0.35em;
+}
+
+.iq-answer-line {
+  margin: 0.2em 0 0.4em 0;
+}
+
+.iq-answer-label {
+  color: var(--iq-muted);
+}
+
+.iq-answer-value {
+  font-weight: 600;
+}
+
+.iq-explain {
+  margin-top: 0.7em;
+  padding-top: 0.6em;
+  border-top: 1px dashed var(--iq-line);
+}
+
+.iq-block-title {
+  font-size: 0.82em;
+  letter-spacing: 0.06em;
+  color: var(--iq-muted);
+  text-transform: uppercase;
+  margin-bottom: 0.25em;
+}
+
+/* ---------- 解题技巧 ---------- */
+.iq-explain.iq-tips {
+  border-top-style: solid;
+  border-top-color: var(--iq-accent);
+}
+
+.iq-tips .iq-block-title {
+  color: var(--iq-accent);
+}
+
+.iq-richtext img {
+  max-width: 100%;
+}
+
+.iq-error {
+  margin-top: 1em;
+  padding: 0.7em 0.9em;
+  border-radius: var(--iq-radius);
+  border: 1.5px solid var(--iq-no);
+  background: var(--iq-no-bg);
+  color: var(--iq-no);
+  font-size: 0.9em;
+}
+
+/* ---------- 答案面 ---------- */
+.iq-card[data-side="back"] .iq-question {
+  margin-bottom: 0.8em;
+}
+
+.iq-card[data-side="back"] .iq-options {
+  margin-top: 0.6em;
+}
+
+.iq-answer-row {
+  display: flex;
+  gap: 0.6em;
+  padding: 0.2em 0;
+}
+
+.iq-answer-no {
+  flex: 0 0 auto;
+  min-width: 1.4em;
+  color: var(--iq-muted);
+  text-align: right;
+}
+
+#iq-raw {
+  display: none;
+}
+
+/* ---------- 计时 ---------- */
+.iq-timer {
+  position: absolute;
+  top: -0.2em;
+  right: 0;
+  font-size: 0.78em;
+  font-variant-numeric: tabular-nums;
+  color: var(--iq-muted);
+  background: var(--iq-panel);
+  border: 1px solid var(--iq-line);
+  border-radius: 999px;
+  padding: 0.05em 0.6em;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 屏幕窄一点时评级按钮更紧凑 */
+@media (max-width: 480px) {
+  .iq-grade {
+    min-width: 4.5em;
+    padding: 0.5em 0.4em;
+  }
+  .iq-grade-sub {
+    display: none;
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "wrong_action": "reveal",
+  "auto_continue_seconds": 0,
+  "shuffle_options": false,
+  "auto_submit_single_choice": true,
+  "fill_ignore_case": true,
+  "fill_ignore_punctuation": true,
+  "reveal_explanation_on_correct": true,
+  "show_source": true,
+  "auto_create_note_type": true,
+  "stats_enabled": true,
+  "stats_retention_days": 0,
+  "show_timer": false,
+  "multi_partial_credit": false,
+  "update_check": true
+}
