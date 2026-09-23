@@ -706,6 +706,7 @@ class FakeEditorNote:
     def __init__(self, name, fields):
         self.model_data = {"name": name, "flds": [{"name": f} for f in fields]}
         self.values = {f: "" for f in fields}
+        self.fields = ["" for _ in fields]
 
     def model(self):
         return self.model_data
@@ -722,6 +723,13 @@ class FakeEditor:
         self.note = FakeEditorNote(name or mod.CHOICE_NOTE_TYPE_NAME, fields or mod.CHOICE_FIELD_NAMES)
         self.web = FakeWeb()
         self.parentWindow = None
+        self.saved = 0
+
+    def saveNow(self, callback=None, keepFocus=False):
+        """真 Anki 的 editor.saveNow(cb)：先把页面里的字段同步回 note，再回调。"""
+        self.saved += 1
+        if callback:
+            callback()
 
 
 ed_choice = FakeEditor()
@@ -745,6 +753,185 @@ hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:add-option
 eq("P121 没人处理的编辑器消息不会产生动作", len(ed_choice.web.evals), before_evals)
 ok("P122 选择题字段里没有「答案」", "答案" not in mod.CHOICE_FIELD_NAMES)
 ok("P123 判断题仍然有「答案」字段（存对/错）", "答案" in mod.TF_FIELD_NAMES)
+
+# ------------------------------------------------------------------ 编辑器里的写回
+# 2026-09-23 修的 bug：以前脚本把内容写进 DOM 里那个 textarea，而新版 Anki 编辑器的
+# textarea 只是输入代理，真正的字段值在页面自己的状态里 → 存出来的卡「选项/答案」是空的。
+# 现在走：插件先 saveNow 取回真实字段值 → 换掉这一格 → 用页面自己的 setFields 写回去。
+from urllib.parse import quote  # noqa: E402
+
+ed_write = FakeEditor()
+mod.on_editor_did_load_note(ed_write)
+ok("P146 注入的配置带字段初值", '"values"' in ed_write.web.evals[0])
+
+ed_write.web.evals.clear()
+ed_write.note.fields = ["题目内容", "", "", "", ""]
+hooks["webview_did_receive_js_message"].run(
+    (False, None), "iq:editor:set:1:" + quote("甲\n*乙\n丙"), ed_write
+)
+ok("P147 写回前先让编辑器保存一次", ed_write.saved == 1, ed_write.saved)
+_write_js = ed_write.web.evals[-1] if ed_write.web.evals else ""
+ok("P148 写回时用页面自己的 setFields", "setFields(" in _write_js, _write_js[:200])
+ok("P149 写回时把字段名一起传过去", json.dumps("选项", ensure_ascii=False) in _write_js)
+ok("P150 写回的内容是我们给的那一份", json.dumps("甲\n*乙\n丙", ensure_ascii=False) in _write_js)
+ok("P151 其它字段原样保留", "题目内容" in _write_js)
+
+ed_tf = FakeEditor(mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES)
+mod.on_editor_did_load_note(ed_tf)
+ed_tf.web.evals.clear()
+ed_tf.note.fields = ["题干", "", "", "", ""]
+hooks["webview_did_receive_js_message"].run(
+    (False, None), "iq:editor:set:1:" + quote("对"), ed_tf
+)
+ok("P152 判断题也能写回", "setFields(" in (ed_tf.web.evals[-1] if ed_tf.web.evals else ""))
+
+before_evals = len(ed_write.web.evals)
+hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:whatever", ed_write)
+eq("P153 编辑器消息里的未知动作不产生动作", len(ed_write.web.evals), before_evals)
+
+before_evals = len(ed_write.web.evals)
+hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:set:1:abc", None)
+eq("P154 没有编辑器上下文时不写", len(ed_write.web.evals), before_evals)
+
+ed_cloze = FakeEditor(mod.CLOZE_NOTE_TYPE_NAME, mod.CLOZE_FIELD_NAMES)
+mod.on_editor_did_load_note(ed_cloze)
+ed_cloze.web.evals.clear()
+ed_cloze.note.fields = ["作者是{{c1::李白}}，{{c2::唐}}代。", "", "", ""]
+hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:refresh", ed_cloze)
+_refresh_js = ed_cloze.web.evals[-1] if ed_cloze.web.evals else ""
+ok("P155 填空刷新会先保存一次", ed_cloze.saved == 1, ed_cloze.saved)
+ok("P156 填空刷新把最新题目推回页面", "applyNativeValues(" in _refresh_js, _refresh_js[:200])
+ok("P157 推回的内容里有挖空", "{{c1::" in _refresh_js, _refresh_js[:300])
+
+# ------------------------------------------------------------------ 相关知识点
+ok("P158 三个题型都有「知识点」字段", all(mod.KNOWLEDGE_FIELD in names for names in (
+    mod.CHOICE_FIELD_NAMES, mod.TF_FIELD_NAMES, mod.CLOZE_FIELD_NAMES)))
+ok("P159 字段排在最后（不动老字段顺序）", mod.CHOICE_FIELD_NAMES[-1] == mod.KNOWLEDGE_FIELD)
+eq("P160 知识点字段映射到隐藏区", mod._RAW_IDS.get(mod.KNOWLEDGE_FIELD), "iq-raw-knowledge")
+nt_choice = mw.col.models.by_name(mod.CHOICE_NOTE_TYPE_NAME)
+ok("P161 卡片模板带知识点内容", "{{%s}}" % mod.KNOWLEDGE_FIELD in nt_choice["tmpls"][0]["qfmt"])
+ok("P162 答案面有知识点区块", 'id="iq-knowledge"' in nt_choice["tmpls"][0]["afmt"])
+
+eq("P163 只有网址时标题就是网址", mod.parse_knowledge("https://a.example/x"),
+   ("https://a.example/x", "https://a.example/x"))
+eq("P164 支持「标题 -> 目标」", mod.parse_knowledge("唐诗格律 -> anki:search:tag:唐诗"),
+   ("唐诗格律", "anki:search:tag:唐诗"))
+eq("P165 支持全角箭头", mod.parse_knowledge("唐诗格律 → tag:唐诗"), ("唐诗格律", "tag:唐诗"))
+eq("P166 HTML 字段也能解析", mod.parse_knowledge("<div>唐诗 -&gt; tag:唐诗</div>"),
+   ("唐诗", "tag:唐诗"))
+eq("P167 空字段返回空", mod.parse_knowledge("<br>"), ("", ""))
+
+eq("P168 网址不进 Anki 搜索", mod.knowledge_query("https://a.example"), "")
+eq("P169 anki:search 前缀", mod.knowledge_query("anki:search:tag:唐诗"), "tag:唐诗")
+eq("P170 anki:tag 前缀", mod.knowledge_query("anki:tag:#唐诗"), "tag:唐诗")
+eq("P171 anki:deck 前缀", mod.knowledge_query("anki:deck:复习"), 'deck:"复习"')
+eq("P172 anki:note 前缀", mod.knowledge_query("anki:note:1234567890"), "nid:1234567890")
+eq("P173 裸搜索式原样用", mod.knowledge_query("tag:唐诗"), "tag:唐诗")
+
+_links = []
+utils.openLink = lambda url: _links.append(url)
+ok("P174 网址交给系统浏览器", mod.open_knowledge("https://a.example/x") is True)
+eq("P175 打开的是那个网址", _links, ["https://a.example/x"])
+
+
+class FakeBrowser:
+    def __init__(self):
+        self.searches = []
+
+    def search_for(self, query):
+        self.searches.append(query)
+
+
+fake_browser = FakeBrowser()
+dialogs = types.ModuleType("aqt.dialogs")
+dialogs.open = lambda name, parent: fake_browser
+aqt.dialogs = dialogs
+sys.modules["aqt.dialogs"] = dialogs
+ok("P176 Anki 搜索式会打开卡片浏览器", mod.open_knowledge("anki:search:tag:唐诗") is True)
+eq("P177 浏览器收到的是搜索式", fake_browser.searches, ["tag:唐诗"])
+eq("P178 空目标什么也不做", mod.open_knowledge("   "), False)
+
+# ------------------------------------------------------------------ 同标签卡片的解题技巧
+class FakeTipNote:
+    def __init__(self, nid, tags, question, tip):
+        self.id = nid
+        self.tags = tags
+        self.fields = [question, "", "", tip, "", ""]
+
+    def model(self):
+        return {
+            "name": mod.CHOICE_NOTE_TYPE_NAME,
+            "flds": [{"name": n} for n in mod.CHOICE_FIELD_NAMES],
+        }
+
+
+class FakeTipCol:
+    def __init__(self, notes):
+        self.notes = notes
+        self.queries = []
+
+    def find_notes(self, query):
+        self.queries.append(query)
+        return [n.id for n in self.notes]
+
+    def get_note(self, nid):
+        for n in self.notes:
+            if n.id == nid:
+                return n
+        raise KeyError(nid)
+
+
+tip_notes = [
+    FakeTipNote(11, ["唐诗"], "静夜思的作者是谁", "看到「作者是谁」先想朝代"),
+    FakeTipNote(12, ["唐诗", "宋词"], "题二", "第二条技巧"),
+    FakeTipNote(13, ["唐诗"], "题三", ""),
+]
+fake_tip_col = FakeTipCol(tip_notes)
+mw.col = fake_tip_col
+ed_tips = FakeEditor()
+ed_tips.note.id = 99
+ed_tips.note.tags = ["唐诗"]
+payload = mod.gather_tips(ed_tips)
+eq("P179 找到同标签且有技巧的卡片", len(payload["items"]), 2)
+eq("P180 共同标签多的排前面", payload["items"][0]["nid"], 12)
+eq("P181 带出题目做标题", payload["items"][0]["title"], "题二")
+ok("P182 查询里带了标签", 'tag:"唐诗"' in fake_tip_col.queries[0], fake_tip_col.queries[0])
+
+ed_tips.note.tags = []
+eq("P183 没有标签时给出原因", mod.gather_tips(ed_tips).get("reason"), "no-tags")
+
+ed_tipmsg = FakeEditor()
+mod.on_editor_did_load_note(ed_tipmsg)
+ed_tipmsg.web.evals.clear()
+hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:tips", ed_tipmsg)
+ok("P184 点按钮会先保存再回推候选", ed_tipmsg.saved == 1, ed_tipmsg.saved)
+ok("P185 回推里带 showTips", "showTips(" in (ed_tipmsg.web.evals[-1] if ed_tipmsg.web.evals else ""))
+
+# 标签框里的标签还在页面里（没提交到 note.tags），消息里会带过来
+ed_tipmsg.web.evals.clear()
+hooks["webview_did_receive_js_message"].run(
+    (False, None),
+    "iq:editor:tips:" + quote(json.dumps(["唐诗"], ensure_ascii=False)),
+    ed_tipmsg,
+)
+_tips_js = ed_tipmsg.web.evals[-1] if ed_tipmsg.web.evals else ""
+ok("P186 页面上的标签也会用来找", "先想朝代" in _tips_js, _tips_js[:200])
+ok("P187 回推里带着标签", "唐诗" in _tips_js, _tips_js[:200])
+mw.col = saved_col
+
+_open_calls = []
+_saved_open = mod.open_knowledge
+mod.open_knowledge = lambda target: (_open_calls.append(target), True)[1]
+hooks["webview_did_receive_js_message"].run(
+    (False, None), "iq:open:" + quote("anki:search:tag:唐诗"), None
+)
+eq("P188 卡片里的知识点消息会去打开", _open_calls, ["anki:search:tag:唐诗"])
+_open_calls.clear()
+hooks["webview_did_receive_js_message"].run(
+    (False, None), "iq:editor:open:" + quote("https://a.example/x"), ed_choice
+)
+eq("P189 编辑器里「试打开」也会去打开", _open_calls, ["https://a.example/x"])
+mod.open_knowledge = _saved_open
 
 # ------------------------------------------------------------------ 从 GitHub 检查更新
 ok("P128 版本号能解析", mod._version_tuple("1.2.3") == (1, 2, 3))

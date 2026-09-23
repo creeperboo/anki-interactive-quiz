@@ -1,14 +1,26 @@
 /* 编辑器助手（assets/editor.js）的测试。
-   REPL 里这样拼： "var editorFactory = function(document, window){" + editor.js + "};" + 本文件 */
+   REPL 里这样拼： "var editorFactory = function(document, window){" + editor.js + "};" + 本文件
 
-var CHOICE_FIELDS = ["题目", "选项", "答案", "解析", "解题技巧", "来源"];
-var TF_FIELDS = ["题目", "答案", "解析", "解题技巧", "来源"];
-var CLOZE_FIELDS = ["题目", "解析", "解题技巧", "来源"];
+   字段值的来去：插件注入时给 values（字段初值），脚本改动时通过 pycmd 发
+   "iq:editor:set:<序号>:<encodeURIComponent(内容)>" 回去，由插件负责真正写进 Anki。
+   DOM 里那个 textarea 只是备份路径（没有宿主时才用）。 */
+
+/* 真实题型里「知识点」排在最后（新字段只能往后追加） */
+var CHOICE_FIELDS = ["题目", "选项", "答案", "解析", "解题技巧", "来源", "知识点"];
+var TF_FIELDS = ["题目", "答案", "解析", "解题技巧", "来源", "知识点"];
+var CLOZE_FIELDS = ["题目", "解析", "解题技巧", "来源", "知识点"];
+
+/* 假的 pycmd：把插件会收到的消息记下来 */
+var iqSent = [];
+var pycmd = function (message) {
+  iqSent.push(String(message));
+};
 
 function makeEditor(values, fields) {
   var dom = makeDOM();
   var win = {};
   fields = fields || CHOICE_FIELDS;
+  values = values || [];
   var html = '<div class="fields">';
   for (var i = 0; i < fields.length; i++) {
     html += '<div class="field-container"><div class="field-label">' + fields[i] + '</div><textarea></textarea></div>';
@@ -29,8 +41,28 @@ function makeEditor(values, fields) {
     areas: areas,
     fire: dom.fire,
     install: function (mode, typeName) {
-      win.__IQ_EDITOR_INSTALL__({ mode: mode, fields: fields, type: typeName || "" });
+      iqSent.length = 0;
+      win.__IQ_EDITOR_INSTALL__({
+        mode: mode,
+        fields: fields,
+        type: typeName || "",
+        values: values
+      });
       return this;
+    },
+    sent: function () {
+      return iqSent.slice();
+    },
+    /* 插件收到的这个字段最后一次内容 */
+    stored: function (name) {
+      var index = fields.indexOf(name);
+      for (var i = iqSent.length - 1; i >= 0; i--) {
+        var m = iqSent[i].match(/^iq:editor:set:(\d+):([\s\S]*)$/);
+        if (m && parseInt(m[1], 10) === index) {
+          return decodeURIComponent(m[2]);
+        }
+      }
+      return null;
     },
     host: function () {
       return dom.document.getElementById("iq-ed-host");
@@ -101,25 +133,25 @@ function key(e, node, spec) {
   e.install("choice");
   e.boxes()[0].checked = true;
   e.fire(e.boxes()[0], "change");
-  eq("F8 勾选后写回字段", e.optionField().value, "*\u7532\n\u4e59");
+  eq("F8 勾选后写回字段", e.stored("\u9009\u9879"), "*\u7532\n\u4e59");
   ok("F9 勾一个 = 单选", e.status().indexOf("\u5355\u9009") >= 0, e.status());
   e.boxes()[1].checked = true;
   e.fire(e.boxes()[1], "change");
-  eq("F10 勾两个写回两个星号", e.optionField().value, "*\u7532\n*\u4e59");
+  eq("F10 勾两个写回两个星号", e.stored("\u9009\u9879"), "*\u7532\n*\u4e59");
   ok("F11 勾两个 = 多选", e.status().indexOf("\u591a\u9009") >= 0, e.status());
   e.boxes()[0].checked = false;
   e.fire(e.boxes()[0], "change");
-  eq("F12 取消勾选会去掉星号", e.optionField().value, "\u7532\n*\u4e59");
+  eq("F12 取消勾选会去掉星号", e.stored("\u9009\u9879"), "\u7532\n*\u4e59");
 })();
 
 (function () {
   var e = makeEditor(["Q", "\u7532\n\u4e59", "", "", "", ""]);
   e.install("choice");
   e.fire(e.inputs()[0], "input");
-  eq("F13 改内容直接写回字段", e.optionField().value, "\u7532\n\u4e59");
+  eq("F13 改内容直接写回字段", e.stored("\u9009\u9879"), "\u7532\n\u4e59");
   e.inputs()[1].value = "\u4e59\u4e59";
   e.fire(e.inputs()[1], "input");
-  eq("F14 改第二行", e.optionField().value, "\u7532\n\u4e59\u4e59");
+  eq("F14 改第二行", e.stored("\u9009\u9879"), "\u7532\n\u4e59\u4e59");
 })();
 
 (function () {
@@ -147,7 +179,7 @@ function key(e, node, spec) {
   e.install("choice");
   key(e, e.inputs()[0], { key: "2", altKey: true });
   eq("F22 Alt+2 勾选第二行", e.boxes()[1].checked, true);
-  eq("F23 写回字段", e.optionField().value, "\u7532\n*\u4e59\n\u4e19");
+  eq("F23 写回字段", e.stored("\u9009\u9879"), "\u7532\n*\u4e59\n\u4e19");
   key(e, e.inputs()[0], { key: "2", altKey: true });
   eq("F24 再按一次取消", e.boxes()[1].checked, false);
 
@@ -155,7 +187,7 @@ function key(e, node, spec) {
   eq("F25 Alt+↓ 把第一行下移", e.inputs()[0].value, "\u4e59");
   key(e, e.inputs()[1], { key: "ArrowUp", altKey: true, keyCode: 38 });
   eq("F26 Alt+↑ 再移回来", e.inputs()[0].value, "\u7532");
-  eq("F27 移动后字段同步", e.optionField().value, "\u7532\n\u4e59\n\u4e19");
+  eq("F27 移动后字段同步", e.stored("\u9009\u9879"), "\u7532\n\u4e59\n\u4e19");
 })();
 
 (function () {
@@ -170,10 +202,10 @@ function key(e, node, spec) {
   e.install("choice");
   e.boxes()[0].checked = true;
   e.fire(e.boxes()[0], "change");
-  eq("F29a 空行勾了也不写进字段", e.optionField().value, "");
+  eq("F29a 空行勾了也不写进字段", e.stored("\u9009\u9879"), "");
   e.inputs()[0].value = "\u7532";
   e.fire(e.inputs()[0], "input");
-  eq("F29b 填了内容才写，且带着星号", e.optionField().value, "*\u7532");
+  eq("F29b 填了内容才写，且带着星号", e.stored("\u9009\u9879"), "*\u7532");
 })();
 
 /* ---------- 判断题：一个勾选框 ---------- */
@@ -187,12 +219,12 @@ function key(e, node, spec) {
 
   e.boxes()[0].checked = true;
   e.fire(e.boxes()[0], "change");
-  eq("F34 勾上 = 对", e.answerField().value, "\u5bf9");
+  eq("F34 勾上 = 对", e.stored("\u7b54\u6848"), "\u5bf9");
   ok("F35 显示当前是对的", e.host().textContent.indexOf("\u5f53\u524d\uff1a\u5bf9") >= 0, e.host().textContent);
 
   e.boxes()[0].checked = false;
   e.fire(e.boxes()[0], "change");
-  eq("F36 不勾 = 错", e.answerField().value, "\u9519");
+  eq("F36 不勾 = 错", e.stored("\u7b54\u6848"), "\u9519");
   ok("F37 显示当前是错的", e.host().textContent.indexOf("\u5f53\u524d\uff1a\u9519") >= 0, e.host().textContent);
 })();
 
@@ -248,9 +280,217 @@ function key(e, node, spec) {
   eq("F45 dump 出选项", dumped["\u9009\u9879"], "\u7532\n\u4e59");
 
   e.api.apply({ "\u9009\u9879": "*\u7532\n\u4e59", "\u9898\u76ee": "Q2" });
-  eq("F46 apply 写回选项", e.optionField().value, "*\u7532\n\u4e59");
+  eq("F46 apply 写回选项", e.stored("\u9009\u9879"), "*\u7532\n\u4e59");
   eq("F47 apply 后控件重建", e.boxes()[0].checked, true);
   eq("F48 apply 状态同步", e.status().indexOf("\u5355\u9009") >= 0, true);
+})();
+
+/* ---------- 字段值的来去（2026-09-23 修：DOM 里的 textarea 不是真源头） ---------- */
+(function () {
+  var e = makeEditor(["Q", "\u7532", "", "", "", ""]);
+  e.install("choice");
+  e.boxes()[0].checked = true;
+  e.fire(e.boxes()[0], "change");
+  var sent = e.sent();
+  eq("G1 改动会发给插件", sent.length, 1);
+  eq("G2 消息格式：字段序号 + 编码后的内容", sent[0], "iq:editor:set:1:" + encodeURIComponent("*\u7532"));
+})();
+
+(function () {
+  /* 插件注入的字段值是 HTML，要能还原成按行文本 */
+  var e = makeEditor(
+    ["Q", "<div>\u7532</div><div>*\u4e59 &amp; \u4e19</div>", "", "", "", ""]
+  );
+  e.install("choice");
+  eq("G3 HTML 里的选项行数", e.rows().length, 2);
+  eq("G4 HTML 标签被去掉", e.inputs()[1].value, "\u4e59 & \u4e19");
+  eq("G5 星号还能认出来", e.boxes()[1].checked, true);
+  eq("G6 还原后是单选", e.status().indexOf("\u5355\u9009") >= 0, true);
+})();
+
+(function () {
+  /* 没有宿主（老版本 Anki）时退回直接写 textarea */
+  var saved = pycmd;
+  pycmd = undefined;
+  try {
+    var e = makeEditor(["Q", "\u7532", "", "", "", ""]);
+    e.install("choice");
+    e.boxes()[0].checked = true;
+    e.fire(e.boxes()[0], "change");
+    eq("G7 没宿主时写 textarea", e.optionField().value, "*\u7532");
+    eq("G8 没宿主时不发消息", e.sent().length, 0);
+  } finally {
+    pycmd = saved;
+  }
+})();
+
+(function () {
+  /* 判断题：勾选框写「对 / 错」 */
+  var e = makeEditor(["Q", "", "", "", ""], TF_FIELDS);
+  e.install("tf");
+  e.boxes()[0].checked = true;
+  e.fire(e.boxes()[0], "change");
+  eq("G9 判断勾选写「对」", e.stored("\u7b54\u6848"), "\u5bf9");
+  eq("G10 判断字段序号对", e.sent()[0].split(":")[3], "1");
+})();
+
+(function () {
+  /* 插件推进来的新值要能刷新状态行（用户在「题目」里补了挖空） */
+  var e = makeEditor(["", "", "", ""], CLOZE_FIELDS);
+  e.install("cloze");
+  ok("G11 一开始说没有空", e.host().textContent.indexOf("\u8fd8\u6ca1\u6709") >= 0, e.host().textContent);
+  e.api.applyNativeValues([
+    "<div>\u4f5c\u8005\u662f{{c1::\u674e\u767d}}\uff0c{{c2::\u5510}}\u4ee3\u3002</div>",
+    "",
+    "",
+    ""
+  ]);
+  ok("G12 推来新值后数出 2 个空", e.host().textContent.indexOf("2 \u4e2a\u7a7a") >= 0, e.host().textContent);
+  e.api.applyNativeValues(["\u5e72\u51c0\u7684\u9898\u76ee", "", "", ""]);
+  ok("G12b 没挖空又变回提示", e.host().textContent.indexOf("\u8fd8\u6ca1\u6709") >= 0, e.host().textContent);
+})();
+
+(function () {
+  /* 其它题型也能收到原生值，只是不画填空状态行 */
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""]);
+  e.install("choice");
+  ok("G12c 选择题也接受原生值", e.api.applyNativeValues(["\u5e8a\u524d", "\u7532", "", "", "", ""]) === true);
+  ok("G12d 选择题状态行不受影响", e.status().indexOf("\u5355\u9009") >= 0, e.status());
+})();
+
+/* ---------- 解题技巧：一键用同标签卡片的技巧（新增） ---------- */
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  e.install("choice");
+  var bar = e.dom.document.getElementById("iq-ed-tipsbar");
+  ok("H1 解题技巧下面有按钮", !!bar);
+  var btn = bar ? bar.querySelector(".iq-ed-mini") : null;
+  ok("H2 按钮文案能看出来是干什么的", btn && btn.textContent.indexOf("\u540c\u6807\u7b7e") >= 0, btn && btn.textContent);
+  e.fire(btn, "click");
+  ok("H3 点它会向插件要同标签技巧", e.sent().length === 1 && e.sent()[0].indexOf("iq:editor:tips:") === 0, e.sent()[0]);
+})();
+
+(function () {
+  /* 标签框里的标签还在页面里，得一起带过去 */
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  var tagEditor = e.dom.document.createElement("div");
+  tagEditor.setAttribute("class", "tag-editor");
+  var chip = e.dom.document.createElement("span");
+  chip.setAttribute("class", "tag");
+  chip.textContent = "\u5510\u8bd7";
+  tagEditor.appendChild(chip);
+  e.dom.document.body.appendChild(tagEditor);
+  e.install("choice");
+  e.fire(e.dom.document.getElementById("iq-ed-tipsbar").querySelector(".iq-ed-mini"), "click");
+  var msg = e.sent()[0] || "";
+  ok("H3a 消息里带着标签框里的标签", msg.indexOf(encodeURIComponent('["\u5510\u8bd7"]')) >= 0, msg);
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  e.install("choice");
+  ok(
+    "H4 只有一条时直接填进技巧",
+    e.api.showTips({ tags: ["\u5510\u8bd7"], items: [{ nid: 1, title: "\u9898\u4e00", tip: "\u5148\u60f3\u671d\u4ee3", tags: ["\u5510\u8bd7"] }] }) === true
+  );
+  eq("H5 技巧写回了字段", e.stored("\u89e3\u9898\u6280\u5de7"), "\u5148\u60f3\u671d\u4ee3");
+  ok("H6 提示里说了来源", e.dom.document.getElementById("iq-ed-tipsbar").textContent.indexOf("\u9898\u4e00") >= 0);
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  e.install("choice");
+  e.api.showTips({
+    tags: ["\u5510\u8bd7"],
+    total: 2,
+    items: [
+      { nid: 2, title: "\u9898\u4e8c", tip: "\u6280\u5de7\u4e8c", tags: ["\u5510\u8bd7", "\u5b8b\u8bcd"] },
+      { nid: 1, title: "\u9898\u4e00", tip: "\u6280\u5de7\u4e00", tags: ["\u5510\u8bd7"] }
+    ]
+  });
+  var panel = e.dom.document.getElementById("iq-ed-tipspanel");
+  ok("H7 多条时候选面板出来了", !!panel);
+  eq("H8 面板里两行", panel.querySelectorAll(".iq-ed-panel-row").length, 2);
+  ok("H9 行里带标签", panel.textContent.indexOf("\u5510\u8bd7") >= 0);
+  e.fire(panel.querySelectorAll(".iq-ed-mini")[1], "click");
+  eq("H10 点「用这条」填的是那一条", e.stored("\u89e3\u9898\u6280\u5de7"), "\u6280\u5de7\u4e00");
+  eq("H11 用完面板收起", e.dom.document.getElementById("iq-ed-tipspanel"), null);
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  e.install("choice");
+  e.api.showTips({ tags: [], items: [], reason: "no-tags" });
+  ok(
+    "H12 没标签时提示先加标签",
+    e.dom.document.getElementById("iq-ed-tipsbar").textContent.indexOf("\u8fd8\u6ca1\u6709\u6807\u7b7e") >= 0
+  );
+  e.api.showTips({ tags: ["\u5510\u8bd7"], items: [], total: 0 });
+  ok(
+    "H13 同标签卡片里没技巧时也提示",
+    e.dom.document.getElementById("iq-ed-tipsbar").textContent.indexOf("\u8fd8\u6ca1\u6709") >= 0
+  );
+})();
+
+(function () {
+  /* 判断题、填空题下面也该有按钮 */
+  var t = makeEditor(["Q", "\u5bf9", "", "", "", ""], TF_FIELDS);
+  t.install("tf");
+  ok("H14 判断题也有技巧按钮", !!t.dom.document.getElementById("iq-ed-tipsbar"));
+  var c = makeEditor(["", "", "", "", ""], CLOZE_FIELDS);
+  c.install("cloze");
+  ok("H15 填空题也有技巧按钮", !!c.dom.document.getElementById("iq-ed-tipsbar"));
+})();
+
+/* ---------- 知识点：预览 + 试打开（新增） ---------- */
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  e.install("choice");
+  var bar = e.dom.document.getElementById("iq-ed-knowbar");
+  ok("H16 知识点下面有预览条", !!bar);
+  ok("H17 空着时提示怎么填", bar.textContent.indexOf("\u8fd8\u6ca1\u586b") >= 0, bar.textContent);
+  var btn = e.dom.document.getElementById("iq-ed-knowtest");
+  ok("H18 空着时试打开按钮禁用", !!btn && btn.getAttribute("disabled") !== null);
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  e.install("choice");
+  e.api.applyNativeValues(["Q", "*\u7532", "", "", "", "", "\u5510\u8bd7\u683c\u5f8b -> anki:search:tag:\u5510\u8bd7"]);
+  var hint = e.dom.document.getElementById("iq-ed-knowhint");
+  ok("H19 预览出按钮文字", hint.textContent.indexOf("\u5510\u8bd7\u683c\u5f8b") >= 0, hint.textContent);
+  ok("H20 预览出这是 Anki 搜索", hint.textContent.indexOf("Anki") >= 0, hint.textContent);
+  var btn = e.dom.document.getElementById("iq-ed-knowtest");
+  ok("H21 有内容后按钮可用", btn.getAttribute("disabled") === null);
+  e.fire(btn, "click");
+  eq(
+    "H22 试打开把目标发给插件",
+    e.sent(),
+    ["iq:editor:open:" + encodeURIComponent("anki:search:tag:\u5510\u8bd7")]
+  );
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  e.install("choice");
+  e.api.applyNativeValues(["Q", "*\u7532", "", "", "", "", "<div>\u9759\u591c\u601d -&gt; https://a.example/x</div>"]);
+  var hint = e.dom.document.getElementById("iq-ed-knowhint");
+  ok("H23 HTML 里的链接也能读出来", hint.textContent.indexOf("\u9759\u591c\u601d") >= 0, hint.textContent);
+  ok("H24 认出是网址", hint.textContent.indexOf("\u7f51\u5740") >= 0, hint.textContent);
+  eq("H25 目标是那个网址", e.api.knowledgeTarget(), "https://a.example/x");
+})();
+
+(function () {
+  var t = makeEditor(["Q", "\u5bf9", "", "", "", ""], TF_FIELDS);
+  t.install("tf");
+  ok("H26 判断题也有知识点预览", !!t.dom.document.getElementById("iq-ed-knowbar"));
+})();
+
+(function () {
+  /* 出错时不挡编辑，但要留下记录 */
+  var e = makeEditor(["Q", "\u7532", "", "", "", ""]);
+  e.install("choice");
+  eq("G13 正常情况下没有错误", e.api.lastError, null);
 })();
 
 log.join("\n") + "\n----\nPASS=" + pass + " FAIL=" + fail;

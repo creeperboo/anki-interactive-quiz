@@ -382,6 +382,45 @@
   color: var(--iq-accent);
 }
 
+/* ---------- 相关知识点（制卡时设的链接） ---------- */
+.iq-know {
+  margin-top: 0.7em;
+}
+
+.iq-know-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  max-width: 100%;
+  padding: 0.4em 0.8em;
+  border-radius: var(--iq-radius);
+  border: 1.5px solid var(--iq-accent);
+  background: transparent;
+  color: var(--iq-accent);
+  font: inherit;
+  font-size: 0.95em;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.iq-know-btn:hover {
+  background: color-mix(in srgb, var(--iq-accent) 14%, transparent);
+}
+
+.iq-know-text {
+  overflow-wrap: anywhere;
+}
+
+.iq-know-hint {
+  margin-top: 0.3em;
+  font-size: 0.82em;
+  color: var(--iq-muted);
+}
+
+.iq-know-hint code {
+  font-size: 0.95em;
+}
+
 .iq-richtext img {
   max-width: 100%;
 }

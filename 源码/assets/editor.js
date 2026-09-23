@@ -8,7 +8,10 @@
  *   判断题：隐藏「答案」文本框，换成一个「正确」勾选框（勾上 = 对，不勾 = 错）
  *   填空题：只显示一行状态（数出几个空 = 几张卡）
  *
- * 所有改动都会写回隐藏的原生文本框，Anki 自己的保存流程照常工作。
+ * 字段的读写都由插件（Python 侧）负责：新版 Anki 编辑器的字段内容存在页面自己的
+ * 状态里（DOM 里那个 textarea 只是输入代理，改了没用），所以这里的改动会通过
+ * pycmd 送回插件，插件先 saveNow 取到真实字段值、换掉我们这一格、再用页面自己的
+ * setFields 写回去。没有宿主（老版本 Anki 字段就是 textarea）时退回直接写 textarea。
  * ===================================================================== */
 (function () {
   "use strict";
@@ -21,6 +24,8 @@
   API.installed = true;
   API.rows = [];
   API.built = false;
+  /* 字段名 -> 当前内容（纯文本）。由插件在注入时给初值，之后我们自己的改动同步更新。 */
+  API.values = API.values || {};
 
   /* ---------------- 小工具 ---------------- */
 
@@ -91,12 +96,97 @@
     return true;
   };
 
+  /* ---------------- 字段值的读写 ---------------- */
+
+  /* 插件给的字段值是 HTML（Anki 存的就是 HTML），转成按行可用的纯文本 */
+  function decodeEntities(text) {
+    return String(text)
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#0*39;|&apos;/gi, "'")
+      .replace(/&amp;/gi, "&");
+  }
+
+  function htmlToText(html) {
+    var s = String(html === null || html === undefined ? "" : html);
+    s = s.replace(/<script[\s\S]*?<\/script\s*>/gi, "");
+    s = s.replace(/<br\s*\/?>/gi, "\n");
+    s = s.replace(/<\s*\/\s*(div|p|li|tr|h[1-6]|blockquote|pre|ul|ol|table|dd|dt)\s*>/gi, "\n");
+    s = s.replace(/<\s*(div|p|li|tr|h[1-6]|blockquote|pre|ul|ol|table|dd|dt)\b[^>]*>/gi, "\n");
+    s = s.replace(/<[^>]*>/g, "");
+    return decodeEntities(s);
+  }
+
+  /* 取某个字段当前的文本：优先用插件给的/我们自己写过的值，没有才回退到 DOM */
+  API.fieldText = function (name) {
+    if (API.values && Object.prototype.hasOwnProperty.call(API.values, name)) {
+      var cached = API.values[name];
+      return cached === null || cached === undefined ? "" : String(cached);
+    }
+    var area = API.area(name);
+    return area ? String(area.value === null || area.value === undefined ? "" : area.value) : "";
+  };
+
+  /* 插件同步过来的「原生字段值」：给状态行、知识点预览这类只读展示用 */
+  API.native = API.native || {};
+
+  API.nativeText = function (name) {
+    if (API.native && Object.prototype.hasOwnProperty.call(API.native, name)) {
+      var v = API.native[name];
+      return v === null || v === undefined ? "" : String(v);
+    }
+    return API.fieldText(name);
+  };
+
+  API.setNative = function (values) {
+    if (!values || !API.cfg) {
+      return false;
+    }
+    var names = API.cfg.fields || [];
+    API.native = {};
+    for (var i = 0; i < names.length; i++) {
+      if (values.length > i) {
+        API.native[names[i]] = htmlToText(values[i]);
+      }
+    }
+    return true;
+  };
+
+  /* 把字段内容送回插件（插件再用页面自己的 setFields 写回 Anki） */
+  function sendToHost(index, text) {
+    if (typeof pycmd !== "function") {
+      return false;
+    }
+    try {
+      pycmd("iq:editor:set:" + index + ":" + encodeURIComponent(text));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function commitField(name, text) {
+    var index = API.index(name);
+    if (index < 0) {
+      return false;
+    }
+    API.values[name] = text;
+    if (sendToHost(index, text)) {
+      return true;
+    }
+    /* 没有宿主：老版本 Anki 的字段就是一个 textarea，直接写 */
+    return API.setValue(API.area(name), text);
+  }
+
+  API.commit = commitField;
+
   API.dump = function () {
     var out = {};
-    var areas = allAreas();
     var names = (API.cfg && API.cfg.fields) || [];
-    for (var i = 0; i < names.length && i < areas.length; i++) {
-      out[names[i]] = areas[i].value;
+    for (var i = 0; i < names.length; i++) {
+      out[names[i]] = API.fieldText(names[i]);
     }
     return JSON.stringify(out);
   };
@@ -104,7 +194,7 @@
   API.apply = function (values) {
     var ok = 0;
     for (var key in values) {
-      if (Object.prototype.hasOwnProperty.call(values, key) && API.setValue(API.area(key), values[key])) {
+      if (Object.prototype.hasOwnProperty.call(values, key) && commitField(key, values[key])) {
         ok++;
       }
     }
@@ -179,6 +269,21 @@
     ".iq-ed-host .iq-ed-ok{color:#1a9c5b;}",
     ".iq-ed-host .iq-ed-warn{color:#c07000;}",
     ".iq-ed-host .iq-ed-tf{display:flex;align-items:center;gap:.45rem;font-weight:600;cursor:pointer;}",
+    ".iq-ed-bar{margin-top:.35rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;}",
+    ".iq-ed-mini{padding:.2rem .6rem;border-radius:6px;cursor:pointer;border:1px solid rgba(128,128,128,.5);",
+    "background:transparent;color:inherit;font:inherit;font-size:.85rem;white-space:nowrap;}",
+    ".iq-ed-mini:hover{border-color:#3b6ef6;}",
+    ".iq-ed-mini[disabled]{opacity:.45;cursor:not-allowed;}",
+    ".iq-ed-bar-hint{font-size:.78rem;opacity:.75;}",
+    ".iq-ed-panel{margin-top:.3rem;padding:.25rem .5rem;width:100%;max-height:15rem;overflow:auto;",
+    "border:1px solid rgba(128,128,128,.35);border-radius:8px;}",
+    ".iq-ed-panel-row{display:flex;gap:.5rem;align-items:flex-start;padding:.3rem 0;",
+    "border-bottom:1px solid rgba(128,128,128,.2);}",
+    ".iq-ed-panel-row:last-child{border-bottom:none;}",
+    ".iq-ed-panel-body{flex:1 1 auto;min-width:0;}",
+    ".iq-ed-panel-title{font-weight:600;font-size:.85rem;}",
+    ".iq-ed-panel-text{font-size:.82rem;opacity:.85;white-space:pre-wrap;}",
+    ".iq-ed-panel-tags{font-size:.75rem;opacity:.6;}",
   ].join("");
 
   function ensureStyle() {
@@ -279,8 +384,7 @@
   /* ---------------- 选择题：选项行编辑器 ---------------- */
 
   function writeOptions() {
-    var area = API.area("\u9009\u9879");
-    if (!area) {
+    if (API.index("\u9009\u9879") < 0) {
       return;
     }
     var lines = [];
@@ -293,7 +397,7 @@
       }
       lines.push((row.box.checked ? "*" : "") + text);
     }
-    API.setValue(area, lines.join("\n"));
+    commitField("\u9009\u9879", lines.join("\n"));
     syncStatus();
   }
 
@@ -528,7 +632,7 @@
     API.list = list;
     API.status = status;
     API.rows = [];
-    var parsed = parseOptions(area.value);
+    var parsed = parseOptions(API.fieldText("\u9009\u9879"));
     for (var i = 0; i < parsed.length; i++) {
       addRowAtEnd(parsed[i].text, parsed[i].correct);
     }
@@ -552,7 +656,7 @@
   function buildTrueFalse(area) {
     hideFieldContainer(area);
     var host = hostAfter(area);
-    var truth = tfValue(area.value);
+    var truth = tfValue(API.fieldText("\u7b54\u6848"));
     var wrapper = el("label", "iq-ed-tf");
     var box = el("input", "iq-ed-box");
     box.setAttribute("type", "checkbox");
@@ -564,7 +668,7 @@
     host.appendChild(hint);
 
     function paint() {
-      var value = tfValue(area.value);
+      var value = tfValue(API.fieldText("\u7b54\u6848"));
       box.checked = value === true;
       hint.textContent =
         value === true
@@ -575,7 +679,7 @@
     }
 
     box.addEventListener("change", function () {
-      API.setValue(area, box.checked ? "\u5bf9" : "\u9519");
+      commitField("\u7b54\u6848", box.checked ? "\u5bf9" : "\u9519");
       paint();
     });
     paint();
@@ -585,14 +689,8 @@
 
   function buildCloze(area) {
     var host = hostAfter(area);
-    var numbers = clozeNumbers(area.value);
-    var status = el(
-      "div",
-      numbers.length ? "iq-ed-status iq-ed-ok" : "iq-ed-status iq-ed-warn",
-      numbers.length
-        ? "\u5171 " + numbers.length + " \u4e2a\u7a7a \u2192 " + numbers.length + " \u5f20\u5361"
-        : "\u26a0 \u9898\u76ee\u91cc\u8fd8\u6ca1\u6709 {{c1::\u7b54\u6848}}"
-    );
+    var status = el("div", "iq-ed-status");
+    status.setAttribute("id", "iq-ed-cloze-status");
     host.appendChild(status);
     var tip = el(
       "div",
@@ -600,7 +698,361 @@
       "\u7528\u5de5\u5177\u680f\u7684\u6316\u7a7a\u6309\u94ae\u6216 Ctrl+Shift+C \u65b0\u5efa\u7a7a"
     );
     host.appendChild(tip);
+    paintClozeStatus(API.fieldText("\u9898\u76ee"));
+    watchClozeField();
   }
+
+  function paintClozeStatus(text) {
+    var node = document.getElementById ? document.getElementById("iq-ed-cloze-status") : null;
+    if (!node) {
+      return;
+    }
+    var numbers = clozeNumbers(htmlToText(text));
+    if (numbers.length) {
+      node.setAttribute("class", "iq-ed-status iq-ed-ok");
+      node.textContent =
+        "\u5171 " + numbers.length + " \u4e2a\u7a7a \u2192 " + numbers.length + " \u5f20\u5361";
+    } else {
+      node.setAttribute("class", "iq-ed-status iq-ed-warn");
+      node.textContent = "\u26a0 \u9898\u76ee\u91cc\u8fd8\u6ca1\u6709 {{c1::\u7b54\u6848}}";
+    }
+  }
+
+  /* 填空题的「题目」是用户在原生输入框里打的，我们读不到实时内容，
+     所以隔一会儿问插件要一次最新字段值，好把「几张卡」刷出来。 */
+  function watchClozeField() {
+    if (API.clozeWatch) {
+      return;
+    }
+    var index = API.index("\u9898\u76ee");
+    if (index < 0) {
+      return;
+    }
+    API.clozeWatch = watchField(index, askHostForValues(500));
+  }
+
+  /* 插件把最新字段值推回来（只用来刷新填空题状态行） */
+  API.applyNativeValues = function (values) {
+    if (!API.cfg || !values || !API.setNative(values)) {
+      return false;
+    }
+    paintClozeStatus(API.nativeText("\u9898\u76ee"));
+    paintKnowledge();
+    return true;
+  };
+
+  /* ---------------- 解题技巧：一键用同标签卡片的技巧 ---------------- */
+
+  function barHost(container, id) {
+    var old = document.getElementById ? document.getElementById(id) : null;
+    if (old && old.parentNode) {
+      old.parentNode.removeChild(old);
+    }
+    var bar = el("div", "iq-ed-bar");
+    bar.setAttribute("id", id);
+    if (container && container.appendChild) {
+      container.appendChild(bar);
+    }
+    return bar;
+  }
+
+  function barHint(bar, text) {
+    if (!bar) {
+      return;
+    }
+    var node = bar.querySelector(".iq-ed-bar-hint");
+    if (!node) {
+      node = el("div", "iq-ed-bar-hint");
+      bar.appendChild(node);
+    }
+    node.textContent = text || "";
+    if (node.style) {
+      node.style.display = text ? "" : "none";
+    }
+  }
+
+  function miniButton(text, onClick) {
+    var btn = el("button", "iq-ed-mini", text);
+    btn.setAttribute("type", "button");
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  /* 标签框里的标签只存在于页面里（用户没失焦前不会同步到插件），所以自己读一份带走 */
+  function currentTags() {
+    var out = [];
+    var nodes = qsa(".tag-editor .tag");
+    for (var i = 0; i < nodes.length; i++) {
+      var text = String(nodes[i].textContent || "").replace(/[\s\u00a0]+/g, "");
+      if (text && out.indexOf(text) < 0) {
+        out.push(text);
+      }
+    }
+    return out;
+  }
+
+  function buildTipsBar() {
+    var area = API.area("\u89e3\u9898\u6280\u5de7");
+    var container = area ? fieldContainer(area) : null;
+    if (!container) {
+      return;
+    }
+    if (document.getElementById && document.getElementById("iq-ed-tipsbar")) {
+      return;
+    }
+    var bar = barHost(container, "iq-ed-tipsbar");
+    bar.appendChild(
+      miniButton("\u26a1 \u7528\u540c\u6807\u7b7e\u5361\u7247\u7684\u6280\u5de7", function () {
+        var old = document.getElementById ? document.getElementById("iq-ed-tipspanel") : null;
+        if (old && old.parentNode) {
+          old.parentNode.removeChild(old);
+        }
+        if (typeof pycmd !== "function") {
+          barHint(bar, "\u6ca1\u6709\u63d2\u4ef6\u901a\u9053\uff0c\u627e\u4e0d\u5230\u540c\u6807\u7b7e\u7684\u5361\u7247");
+          return;
+        }
+        barHint(bar, "\u6b63\u5728\u627e\u540c\u6807\u7b7e\u7684\u5361\u7247\u2026");
+        try {
+          pycmd("iq:editor:tips:" + encodeURIComponent(JSON.stringify(currentTags())));
+        } catch (e) {
+          barHint(bar, "\u627e\u4e0d\u5230\u63d2\u4ef6\u901a\u9053");
+        }
+      })
+    );
+    barHint(bar, "");
+  }
+
+  /* 插件把候选技巧推过来 */
+  API.showTips = function (payload) {
+    payload = payload || {};
+    var bar = document.getElementById ? document.getElementById("iq-ed-tipsbar") : null;
+    if (!bar) {
+      return false;
+    }
+    var old = document.getElementById ? document.getElementById("iq-ed-tipspanel") : null;
+    if (old && old.parentNode) {
+      old.parentNode.removeChild(old);
+    }
+    if (payload.error) {
+      barHint(bar, "\u6ca1\u67e5\u5230\uff1a" + payload.error);
+      return false;
+    }
+    if (payload.reason === "no-tags") {
+      barHint(bar, "\u8fd9\u5f20\u5361\u8fd8\u6ca1\u6709\u6807\u7b7e\uff1a\u5148\u5728\u4e0b\u9762\u52a0\u4e0a\u6807\u7b7e\uff0c\u518d\u70b9\u8fd9\u91cc");
+      return false;
+    }
+    var items = payload.items || [];
+    if (!items.length) {
+      barHint(bar, "\u540c\u6807\u7b7e\u7684\u5361\u7247\u91cc\u8fd8\u6ca1\u6709\u300c\u89e3\u9898\u6280\u5de7\u300d");
+      return false;
+    }
+    if (items.length === 1) {
+      commitField("\u89e3\u9898\u6280\u5de7", items[0].tip);
+      barHint(bar, "\u5df2\u586b\u5165\uff1a" + items[0].title);
+      return true;
+    }
+    var panel = el("div", "iq-ed-panel");
+    panel.setAttribute("id", "iq-ed-tipspanel");
+    for (var i = 0; i < items.length; i++) {
+      buildTipRow(panel, bar, items[i]);
+    }
+    bar.appendChild(panel);
+    barHint(
+      bar,
+      "\u627e\u5230 " + items.length + " \u6761" + (payload.total > items.length ? "\uff08\u5171 " + payload.total + " \u6761\uff09" : "") + "\uff0c\u9009\u4e00\u6761\uff1a"
+    );
+    return true;
+  };
+
+  function buildTipRow(panel, bar, item) {
+    var row = el("div", "iq-ed-panel-row");
+    row.appendChild(
+      miniButton("\u7528\u8fd9\u6761", function () {
+        commitField("\u89e3\u9898\u6280\u5de7", item.tip);
+        barHint(bar, "\u5df2\u586b\u5165\uff1a" + item.title);
+        if (panel.parentNode) {
+          panel.parentNode.removeChild(panel);
+        }
+      })
+    );
+    var body = el("div", "iq-ed-panel-body");
+    body.appendChild(el("div", "iq-ed-panel-title", item.title || ""));
+    body.appendChild(el("div", "iq-ed-panel-text", item.tip || ""));
+    if (item.tags && item.tags.length) {
+      body.appendChild(el("div", "iq-ed-panel-tags", "\ud83c\udff7 " + item.tags.join(" \u00b7 ")));
+    }
+    row.appendChild(body);
+    panel.appendChild(row);
+  }
+
+  /* ---------------- 知识点：预览 + 试打开 ---------------- */
+
+  function knowledgeFrom(text) {
+    var lines = String(text === null || text === undefined ? "" : text).split(/\r\n|\r|\n/);
+    var first = "";
+    for (var i = 0; i < lines.length; i++) {
+      var s = lines[i].replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
+      if (s) {
+        first = s;
+        break;
+      }
+    }
+    if (!first) {
+      return null;
+    }
+    var label = first;
+    var target = first;
+    var cut = first.indexOf("->");
+    var width = 2;
+    if (cut < 0) {
+      cut = first.indexOf("\u2192");
+      width = 1;
+    }
+    if (cut > 0) {
+      label = first.slice(0, cut).replace(/[\s\u00a0]+$/, "");
+      target = first.slice(cut + width).replace(/^[\s\u00a0]+/, "");
+    }
+    if (!target) {
+      target = first;
+      label = first;
+    }
+    return { label: label || target, target: target };
+  }
+
+  API.knowledge = function () {
+    return knowledgeFrom(API.nativeText("\u77e5\u8bc6\u70b9"));
+  };
+
+  API.knowledgeTarget = function () {
+    var k = API.knowledge();
+    return k ? k.target : "";
+  };
+
+  function paintKnowledge() {
+    var hint = document.getElementById ? document.getElementById("iq-ed-knowhint") : null;
+    if (!hint) {
+      return;
+    }
+    var btn = document.getElementById ? document.getElementById("iq-ed-knowtest") : null;
+    var k = API.knowledge();
+    if (!k) {
+      hint.textContent =
+        "\u8fd8\u6ca1\u586b\uff1a\u7b2c\u4e00\u884c\u5199\u7f51\u5740\uff0c\u6216\u300c\u6807\u9898 -> anki:search:\u6807\u7b7e\u300d";
+      if (btn) {
+        btn.setAttribute("disabled", "disabled");
+      }
+      return;
+    }
+    var kind = /^(https?|mailto|file|ftp):/i.test(k.target) ? "\u7f51\u5740" : "Anki \u641c\u7d22";
+    hint.textContent = "\u6309\u94ae\u4f1a\u663e\u793a\uff1a" + k.label + "\uff08" + kind + "\uff09";
+    if (btn) {
+      btn.removeAttribute("disabled");
+    }
+  }
+
+  function watchField(index, onInput) {
+    if (typeof document.querySelectorAll !== "function") {
+      return null;
+    }
+    var containers = qsa('.field-container[data-index="' + index + '"]');
+    if (!containers.length) {
+      var all = qsa(".field-container");
+      containers = all[index] ? [all[index]] : [];
+    }
+    var target = containers.length
+      ? containers[0].querySelector(".rich-text-editable") || containers[0].querySelector("textarea")
+      : null;
+    if (!target || typeof target.addEventListener !== "function") {
+      return null;
+    }
+    target.addEventListener("input", onInput);
+    target.addEventListener("blur", onInput);
+    return target;
+  }
+
+  function askHostForValues(delay) {
+    return function () {
+      if (API.refreshTimer || typeof setTimeout !== "function") {
+        return;
+      }
+      API.refreshTimer = setTimeout(function () {
+        API.refreshTimer = null;
+        if (typeof pycmd === "function") {
+          try {
+            pycmd("iq:editor:refresh");
+          } catch (e) {
+            /* 忽略 */
+          }
+        }
+      }, delay);
+    };
+  }
+
+  function buildKnowledgeBar() {
+    var area = API.area("\u77e5\u8bc6\u70b9");
+    var container = area ? fieldContainer(area) : null;
+    if (!container) {
+      return;
+    }
+    if (document.getElementById && document.getElementById("iq-ed-knowbar")) {
+      return;
+    }
+    var bar = barHost(container, "iq-ed-knowbar");
+    var btn = miniButton("\u8bd5\u6253\u5f00", function () {
+      var target = API.knowledgeTarget();
+      if (!target) {
+        return;
+      }
+      if (typeof pycmd === "function") {
+        try {
+          pycmd("iq:editor:open:" + encodeURIComponent(target));
+          return;
+        } catch (e) {
+          /* 落到下面的兜底 */
+        }
+      }
+      if (typeof window.open === "function" && /^(https?|mailto):/i.test(target)) {
+        try {
+          window.open(target, "_blank");
+        } catch (e) {
+          /* 忽略 */
+        }
+      }
+    });
+    btn.setAttribute("id", "iq-ed-knowtest");
+    bar.appendChild(btn);
+    var hint = el("div", "iq-ed-bar-hint");
+    hint.setAttribute("id", "iq-ed-knowhint");
+    bar.appendChild(hint);
+    watchField(API.index("\u77e5\u8bc6\u70b9"), askHostForValues(400));
+    paintKnowledge();
+  }
+
+  function ensureBars() {
+    if (!API.cfg || !API.cfg.mode) {
+      return;
+    }
+    if (!document.getElementById || !document.getElementById("iq-ed-tipsbar")) {
+      buildTipsBar();
+    }
+    if (!document.getElementById || !document.getElementById("iq-ed-knowbar")) {
+      buildKnowledgeBar();
+    }
+  }
+
+  /* 插件把最新字段值推过来（例如用户在「题目」里打了字之后） */
+  API.setValues = function (values) {
+    if (!values || !API.cfg) {
+      return false;
+    }
+    var names = API.cfg.fields || [];
+    for (var i = 0; i < names.length; i++) {
+      if (values.length > i) {
+        API.values[names[i]] = htmlToText(values[i]);
+      }
+    }
+    return true;
+  };
 
   /* ---------------- 组装 ---------------- */
 
@@ -615,6 +1067,7 @@
     API.list = null;
     API.status = null;
     API.built = false;
+    API.lastError = null;
     var mode = API.cfg ? API.cfg.mode : "";
     try {
       if (mode === "choice") {
@@ -637,7 +1090,20 @@
         }
       }
     } catch (e) {
-      /* 出错就当没这回事，绝不挡着编辑 */
+      /* 出错就当没这回事，绝不挡着编辑；但记下来，方便排查 */
+      API.lastError = String((e && e.stack) || e);
+      try {
+        if (typeof console !== "undefined" && console && console.warn) {
+          console.warn("[互动答题卡] 编辑器助手出错:", e);
+        }
+      } catch (e2) {
+        /* 忽略 */
+      }
+    }
+    try {
+      ensureBars();
+    } catch (e) {
+      API.lastError = API.lastError || String((e && e.stack) || e);
     }
     API.keepAlive();
     return API.built;
@@ -663,6 +1129,8 @@
       }
       if (!document.getElementById("iq-ed-host")) {
         API.build();
+      } else {
+        ensureBars();
       }
     }, 900);
   };
@@ -686,6 +1154,12 @@
 
   window.__IQ_EDITOR_INSTALL__ = function (cfg) {
     API.cfg = cfg || null;
+    API.values = {};
+    API.native = {};
+    if (API.cfg && API.cfg.values) {
+      API.setValues(API.cfg.values);
+      API.setNative(API.cfg.values);
+    }
     return API.buildWhenReady(0);
   };
 })();

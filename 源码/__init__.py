@@ -37,7 +37,7 @@ STATS_DB_PATH = USER_FILES_DIR / "stats.db"
 # 版本 & 从 GitHub 检查更新
 # --------------------------------------------------------------------------
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 # 更新检查从这里拉：https://github.com/creeperboo/anki-interactive-quiz
 UPDATE_REPO = "creeperboo/anki-interactive-quiz"
@@ -59,22 +59,25 @@ FIELD_NAMES = ["题目", "选项", "答案", "解析", "来源", "解题技巧"]
 SAMPLE_DECK = "答题卡示例"
 CONFIG_MARKER = "/*ANKI_QUIZ_CONFIG_MARKER*/"
 
+# 「知识点」：卡里放一个链接（或 Anki 搜索式），答完题后可以一键跳过去
+KNOWLEDGE_FIELD = "知识点"
+
 # 每个题型各自独立，字段也各自独立
 CHOICE_NOTE_TYPE_NAME = "互动答题卡·选择题"
 CHOICE_CARD_NAME = "选择"
 # 选择题的正误直接标在「选项」行里，不需要「答案」字段
-CHOICE_FIELD_NAMES = ["题目", "选项", "解析", "解题技巧", "来源"]
+CHOICE_FIELD_NAMES = ["题目", "选项", "解析", "解题技巧", "来源", KNOWLEDGE_FIELD]
 
 TF_NOTE_TYPE_NAME = "互动答题卡·判断题"
 TF_CARD_NAME = "判断"
 # 判断题的「答案」字段还在（勾选框要往里写 对/错），只是编辑器里被藏起来
-TF_FIELD_NAMES = ["题目", "答案", "解析", "解题技巧", "来源"]
+TF_FIELD_NAMES = ["题目", "答案", "解析", "解题技巧", "来源", KNOWLEDGE_FIELD]
 
 # 原生填空（cloze）题型：跟 Anki 自带的「填空题」一样，题目里写 {{c1::答案}}，
 # 一个 c 号出一张卡；编辑器里也能直接用挖空按钮 / Ctrl+Shift+C。
 CLOZE_NOTE_TYPE_NAME = "互动答题卡·填空"
 CLOZE_CARD_NAME = "填空"
-CLOZE_FIELD_NAMES = ["题目", "解析", "解题技巧", "来源"]
+CLOZE_FIELD_NAMES = ["题目", "解析", "解题技巧", "来源", KNOWLEDGE_FIELD]
 CLOZE_MARKER = "/*ANKI_QUIZ_CLOZE_MARKER*/"
 
 MODE_ORDER = ["single", "multi", "tf", "fill"]
@@ -179,6 +182,29 @@ def _read_asset(name: str) -> str:
     return _asset_cache[name]
 
 
+_HTML_BLOCKS = "div|p|li|tr|h[1-6]|section|article|blockquote|pre|ul|ol|table|dd|dt|br"
+
+
+def _html_to_text(text: Any) -> str:
+    """把字段内容（HTML）变成按行纯文本，跟卡片端 htmlToText 一套规则。"""
+    s = str(text if text is not None else "")
+    s = re.sub(r"<script[\s\S]*?</script\s*>", "", s, flags=re.I)
+    s = re.sub(r"<style[\s\S]*?</style\s*>", "", s, flags=re.I)
+    s = re.sub(r"<\s*br\s*/?\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"<\s*/\s*(%s)\s*>" % _HTML_BLOCKS, "\n", s, flags=re.I)
+    s = re.sub(r"<\s*(%s)\b[^>]*>" % _HTML_BLOCKS, "\n", s, flags=re.I)
+    s = re.sub(r"<[^>]*>", "", s)
+    s = (
+        s.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+    )
+    return s
+
+
 # 字段名 -> 隐藏区里的 id，卡片端脚本按这些 id 读原始内容
 _RAW_IDS = {
     "选项": "iq-raw-options",
@@ -186,6 +212,7 @@ _RAW_IDS = {
     "解析": "iq-raw-explanation",
     "解题技巧": "iq-raw-tips",
     "来源": "iq-raw-source",
+    "知识点": "iq-raw-knowledge",
     "类型": "iq-raw-type",
 }
 
@@ -233,6 +260,7 @@ def _card_bodies(field_names: list[str], cloze: bool = False) -> tuple[str, str]
         '<div id="iq-answer-list"></div></div>\n'
         '  <div class="iq-explain" id="iq-explanation"></div>\n'
         '  <div class="iq-explain iq-tips" id="iq-tips"></div>\n'
+        '  <div class="iq-explain iq-knowledge" id="iq-knowledge"></div>\n'
         '  <div class="iq-explain" id="iq-source"></div>\n'
         "</div>\n"
         "%s\n"
@@ -500,6 +528,7 @@ _SAMPLE_CHOICE: dict[str, str] = {
     "解析": "《静夜思》是唐代诗人李白的作品。",
     "解题技巧": "看到「作者是谁」这类题，先想朝代：盛唐诗人里李白、杜甫出现得最多，再回忆课本插图。",
     "来源": "示例卡片",
+    "知识点": "《静夜思》全文 -> https://zh.wikipedia.org/wiki/静夜思",
 }
 
 _SAMPLE_TF: dict[str, str] = {
@@ -508,6 +537,7 @@ _SAMPLE_TF: dict[str, str] = {
     "解析": "太阳从东边升起，西边落下。",
     "解题技巧": "判断题里出现与常识相反的描述，先按常识把它反过来读一遍，再判断。",
     "来源": "示例卡片",
+    "知识点": "anki:search:太阳",
 }
 
 def create_samples() -> int:
@@ -543,6 +573,7 @@ _CLOZE_SAMPLE: dict[str, str] = {
     "解析": "原生填空题：题目里写 {{c1::答案}}，一个 c 号出一张卡，可到卡片浏览器对照。",
     "解题技巧": "挖空最好一次只挖一类信息（人名、朝代、名句），复习时思路更清楚。",
     "来源": "示例卡片",
+    "知识点": "唐诗 -> anki:search:tag:唐诗",
 }
 
 
@@ -565,7 +596,7 @@ def rebuild_note_type() -> None:
     results = ensure_all_note_types()
     failed = [name for name, ok in results.items() if not ok]
     if not failed:
-        tooltip("互动答题卡：四个题型模板都已创建 / 更新")
+        tooltip("互动答题卡：三个题型模板都已创建 / 更新")
     elif len(failed) < len(results):
         showInfo("互动答题卡：这些题型没建成，请重试 —— %s" % "、".join(failed))
     else:
@@ -1025,7 +1056,7 @@ def _parse_result(parts: list[str]) -> dict[str, Any]:
     }
 
 
-def _handle_message(message: str) -> Any:
+def _handle_message(message: str, context: Any = None) -> Any:
     reviewer = getattr(mw, "reviewer", None)
     card_id = _current_card_id()
     parts = message.split(":")
@@ -1033,6 +1064,22 @@ def _handle_message(message: str) -> Any:
 
     if action == "config":
         return get_config()
+
+    if action == "open":
+        # 卡片 / 编辑器里点了「相关知识点」
+        target = parts[2] if len(parts) > 2 else ""
+        try:
+            from urllib.parse import unquote
+
+            target = unquote(target)
+        except Exception:
+            pass
+        open_knowledge(target)
+        return None
+
+    if action == "editor":
+        # 编辑器里的控件（选择/判断的勾选、同标签技巧、填空刷新）走这条
+        return _handle_editor_message(parts, context)
 
     if reviewer is None or card_id is None:
         return None
@@ -1076,7 +1123,7 @@ def on_js_message(handled: Any, message: str, context: Any) -> Any:
     if not isinstance(message, str) or not message.startswith("iq:"):
         return handled
     try:
-        result = _handle_message(message)
+        result = _handle_message(message, context)
     except Exception as exc:
         print(f"[互动答题卡] 处理 {message!r} 出错: {exc}")
         result = None
@@ -1559,7 +1606,393 @@ def _editor_config(editor: Any) -> dict[str, Any]:
         "type": _editor_note_type_name(editor),
         "mode": _editor_mode(editor),
         "fields": _editor_field_names(editor),
+        "values": _editor_field_values(editor),
     }
+
+
+def _editor_field_values(editor: Any) -> list[str]:
+    """编辑器里这张笔记当前的字段内容（HTML）。
+
+    新版 Anki 编辑器的字段内容不在 DOM 里（那个 textarea 只是输入代理），
+    所以初值由 Python 侧直接给，省得脚本去猜。
+    """
+    try:
+        return [str(value) for value in editor.note.fields]
+    except Exception:
+        return []
+
+
+# --------------------------------------------------------------------------
+# 「知识点」：制卡时填一个链接（或 Anki 搜索式），答完题后一键跳过去
+# --------------------------------------------------------------------------
+
+_LINK_SCHEME_RE = re.compile(r"^(https?|mailto|file|ftp):", re.I)
+
+
+def parse_knowledge(raw: Any) -> tuple[str, str]:
+    """把「知识点」字段解析成 (按钮文字, 目标)。第一行有效，两种写法：
+
+        https://zh.wikipedia.org/wiki/静夜思
+        唐诗格律 -> anki:search:tag:唐诗
+
+    目标是网址就交给系统浏览器；否则当成 Anki 搜索式（支持 anki:search: / anki:deck: /
+    anki:tag: / anki:note: 前缀，写成裸的搜索式比如 tag:唐诗 也行）。
+    """
+    lines = [line.strip() for line in _html_to_text(raw).splitlines()]
+    first = ""
+    for line in lines:
+        if line:
+            first = line
+            break
+    if not first:
+        return "", ""
+    label = first
+    target = first
+    cut = first.find("->")
+    width = 2
+    if cut < 0:
+        cut = first.find("→")
+        width = 1
+    if cut > 0:
+        label = first[:cut].strip()
+        target = first[cut + width :].strip()
+    if not target:
+        target = first
+        label = first
+    return label or target, target
+
+
+def knowledge_query(target: str) -> str:
+    """把目标转成 Anki 搜索式；是网址就返回空串。"""
+    t = (target or "").strip()
+    if not t or _LINK_SCHEME_RE.match(t):
+        return ""
+    low = t.lower()
+    if not low.startswith("anki:"):
+        return t
+    body = t[5:].strip()
+    if ":" not in body:
+        return body
+    cmd, rest = body.split(":", 1)
+    cmd = cmd.strip().lower()
+    rest = rest.strip()
+    if cmd in ("search", "browse", "find"):
+        return rest
+    if cmd in ("deck", "牌组"):
+        return 'deck:"%s"' % rest if rest else ""
+    if cmd in ("tag", "标签"):
+        return ("tag:" + rest.lstrip("#")) if rest else ""
+    if cmd in ("note", "nid", "笔记"):
+        digits = re.sub(r"\D", "", rest)
+        return ("nid:" + digits) if digits else ""
+    return body
+
+
+def _open_external_link(url: str) -> bool:
+    try:
+        from aqt.utils import openLink  # type: ignore
+
+        openLink(url)
+        return True
+    except Exception as exc:
+        print(f"[互动答题卡] 打不开链接 {url!r}: {exc}")
+        return False
+
+
+def _open_browser_search(query: str) -> bool:
+    query = (query or "").strip()
+    if not query:
+        return False
+    browser = None
+    try:
+        from aqt import dialogs  # type: ignore
+
+        browser = dialogs.open("Browser", mw)
+    except Exception as exc:
+        print(f"[互动答题卡] 打不开卡片浏览器: {exc}")
+    for name in ("search_for", "search"):
+        fn = getattr(browser, name, None)
+        if callable(fn):
+            try:
+                fn(query)
+                return True
+            except Exception as exc:
+                print(f"[互动答题卡] 浏览器 {name} 失败: {exc}")
+    try:  # 老版本兜底：直接往搜索框里塞
+        browser.searchEdit.setSearch(query)
+        return True
+    except Exception as exc:
+        print(f"[互动答题卡] 搜索 {query!r} 失败: {exc}")
+        return False
+
+
+def open_knowledge(target: str) -> bool:
+    """按「知识点」的内容跳过去：网址开浏览器，其它当作 Anki 搜索式。"""
+    t = (target or "").strip()
+    if not t:
+        return False
+    if _LINK_SCHEME_RE.match(t):
+        return _open_external_link(t)
+    query = knowledge_query(t)
+    if not query:
+        return False
+    return _open_browser_search(query)
+
+
+def _field_index(note: Any, name: str) -> int:
+    try:
+        names = [f["name"] for f in note.model()["flds"]]
+    except Exception:
+        return -1
+    try:
+        return names.index(name)
+    except ValueError:
+        return -1
+
+
+def _note_field_text(note: Any, name: str) -> str:
+    index = _field_index(note, name)
+    if index < 0:
+        return ""
+    try:
+        return _html_to_text(note.fields[index]).strip()
+    except Exception:
+        return ""
+
+
+_SKIP_TAGS = ("marked", "leech")
+
+
+def gather_tips(editor: Any, page_tags: Optional[list[str]] = None) -> dict[str, Any]:
+    """找「同标签的其他卡片」里的解题技巧，给编辑器里的按钮用。
+
+    page_tags：编辑器页面里刚敲、还没同步回来的标签（用户没失焦前 note.tags 里没有）。
+    """
+    try:
+        note = editor.note
+    except Exception:
+        return {"tags": [], "items": [], "error": "拿不到当前笔记"}
+    try:
+        tags = [str(t) for t in getattr(note, "tags", []) if t and str(t) not in _SKIP_TAGS]
+    except Exception:
+        tags = []
+    for tag in page_tags or []:
+        tag = str(tag).strip()
+        if tag and tag not in _SKIP_TAGS and tag not in tags:
+            tags.append(tag)
+    if not tags:
+        return {"tags": [], "items": [], "reason": "no-tags"}
+    query = "(" + " or ".join('tag:"%s"' % t.replace('"', "") for t in tags) + ")"
+    try:
+        nids = mw.col.find_notes(query)
+    except Exception as exc:
+        return {"tags": tags, "items": [], "error": str(exc)}
+    try:
+        current_id = int(getattr(note, "id", 0) or 0)
+    except Exception:
+        current_id = 0
+    items: list[dict[str, Any]] = []
+    for nid in nids:
+        if nid == current_id:
+            continue
+        try:
+            other = mw.col.get_note(nid)
+            tip = _note_field_text(other, "解题技巧")
+        except Exception:
+            continue
+        if not tip:
+            continue
+        try:
+            shared = [str(t) for t in other.tags if str(t) in tags]
+        except Exception:
+            shared = list(tags)
+        items.append(
+            {
+                "nid": nid,
+                "title": (_note_field_text(other, "题目") or "（没有题目）")[:60],
+                "tip": tip[:400],
+                "tags": shared[:4],
+            }
+        )
+    items.sort(key=lambda item: (-len(item["tags"]), -int(item["nid"])))
+    return {"tags": tags, "items": items[:20], "total": len(items)}
+
+
+def _push_tips(editor: Any, payload: dict[str, Any]) -> None:
+    js = "window.__IQ_EDITOR__ && window.__IQ_EDITOR__.showTips(%s);" % json.dumps(
+        payload, ensure_ascii=False
+    )
+    try:
+        editor.web.eval(js)
+    except Exception as exc:
+        print(f"[互动答题卡] 推送同标签技巧失败: {exc}")
+
+
+def _request_tips(editor: Any, page_tags: Optional[list[str]] = None) -> None:
+    """先保存一次（把用户刚敲的标签同步过来），再去找同标签的技巧。"""
+
+    def after_save() -> None:
+        try:
+            payload = gather_tips(editor, page_tags)
+        except Exception as exc:
+            payload = {"tags": [], "items": [], "error": str(exc)}
+        _push_tips(editor, payload)
+
+    save_now = getattr(editor, "saveNow", None)
+    if callable(save_now):
+        try:
+            save_now(after_save)
+            return
+        except Exception as exc:
+            print(f"[互动答题卡] 编辑器 saveNow 失败，仍然尝试取技巧: {exc}")
+    after_save()
+
+
+# 编辑器里控件改动的写回：先 saveNow 取回真实字段值 → 换掉我们这一格 →
+# 用编辑器页面自己的 setFields 写回去。（DOM 里的 textarea 改了没用，别写它。）
+_EDITOR_WRITE_JS = """(function () {
+  var names = %(names)s;
+  var values = %(values)s;
+  try {
+    if (typeof window.setFields === "function") {
+      window.setFields(names, values);
+      return "setFields";
+    }
+  } catch (e) {
+    /* 落到下面的兜底 */
+  }
+  try {
+    var area = document.querySelectorAll(".fields textarea")[%(index)d];
+    if (area) {
+      area.value = values[%(index)d];
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+      return "dom";
+    }
+  } catch (e) {
+    /* 忽略 */
+  }
+  return "";
+})()"""
+
+_editor_writes: dict[int, tuple[int, str]] = {}
+
+
+def _apply_editor_write(editor: Any, index: int, text: str) -> None:
+    try:
+        note = editor.note
+        fields = [str(value) for value in note.fields]
+        names = [f["name"] for f in note.model()["flds"]]
+    except Exception as exc:
+        print(f"[互动答题卡] 取编辑器字段失败: {exc}")
+        return
+    if index < 0 or index >= len(fields):
+        return
+    fields[index] = text
+    js = _EDITOR_WRITE_JS % {
+        "names": json.dumps(names, ensure_ascii=False),
+        "values": json.dumps(fields, ensure_ascii=False),
+        "index": index,
+    }
+    try:
+        editor.web.eval(js)
+    except Exception as exc:
+        print(f"[互动答题卡] 写回编辑器字段失败: {exc}")
+
+
+def _write_editor_field(editor: Any, index: int, text: str) -> None:
+    """把某个字段的新内容写进编辑器（同一编辑器的连续改动会合并成最后一次）。"""
+    key = id(editor)
+    _editor_writes[key] = (index, text)
+
+    def after_save() -> None:
+        item = _editor_writes.pop(key, None)
+        if item is not None:
+            _apply_editor_write(editor, item[0], item[1])
+
+    save_now = getattr(editor, "saveNow", None)
+    if callable(save_now):
+        try:
+            save_now(after_save)
+            return
+        except Exception as exc:
+            print(f"[互动答题卡] 编辑器 saveNow 失败，改为直接写: {exc}")
+    after_save()
+
+
+def _handle_editor_message(parts: list[str], editor: Any) -> Any:
+    """处理编辑器控件发回来的 iq:editor:set:<字段序号>:<内容>。"""
+    if editor is None or not hasattr(editor, "web"):
+        return None
+    action = parts[2] if len(parts) > 2 else ""
+    if action == "refresh":
+        # 用户在原生字段里打字后，把最新字段值推回页面刷新提示（填空状态行、知识点预览）
+        _refresh_editor_fields(editor)
+        return None
+    if action == "tips":
+        # 「用同标签卡片的技巧」：第 4 段是编辑器页面里当前标签框的内容（可能有还没提交的）
+        page_tags: list[str] = []
+        if len(parts) > 3 and parts[3]:
+            try:
+                from urllib.parse import unquote
+
+                decoded = json.loads(unquote(parts[3]))
+                if isinstance(decoded, list):
+                    page_tags = [str(t) for t in decoded]
+            except Exception as exc:
+                print(f"[互动答题卡] 读编辑器标签失败: {exc}")
+        _request_tips(editor, page_tags)
+        return None
+    if action == "open":
+        # 编辑器里「知识点」旁边的「试打开」
+        if len(parts) > 3 and parts[3]:
+            from urllib.parse import unquote
+
+            try:
+                open_knowledge(unquote(parts[3]))
+            except Exception as exc:
+                print(f"[互动答题卡] 试打开发挥失败: {exc}")
+        return None
+    if action != "set" or len(parts) < 4:
+        return None
+    try:
+        index = int(parts[3])
+    except (TypeError, ValueError):
+        return None
+    from urllib.parse import unquote
+
+    try:
+        text = unquote(parts[4])
+    except Exception:
+        text = parts[4]
+    _write_editor_field(editor, index, text)
+    return None
+
+
+def _refresh_editor_fields(editor: Any) -> None:
+    """把编辑器里最新的字段值推回页面（填空状态行、知识点预览都靠它刷新）。"""
+
+    def after_save() -> None:
+        try:
+            values = [str(value) for value in editor.note.fields]
+        except Exception:
+            return
+        js = (
+            "window.__IQ_EDITOR__ && window.__IQ_EDITOR__.applyNativeValues"
+            " && window.__IQ_EDITOR__.applyNativeValues(%s);" % json.dumps(values, ensure_ascii=False)
+        )
+        try:
+            editor.web.eval(js)
+        except Exception as exc:
+            print(f"[互动答题卡] 刷新编辑器状态失败: {exc}")
+
+    save_now = getattr(editor, "saveNow", None)
+    if callable(save_now):
+        try:
+            save_now(after_save)
+            return
+        except Exception as exc:
+            print(f"[互动答题卡] 编辑器 saveNow 失败，改为直接刷新: {exc}")
+    after_save()
 
 
 def on_editor_did_load_note(editor: Any) -> None:

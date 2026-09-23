@@ -416,8 +416,88 @@
       tips: rawHTML("iq-raw-tips"),
       tipsText: splitLines(rawHTML("iq-raw-tips")).join("\n"),
       source: rawHTML("iq-raw-source"),
-      sourceText: splitLines(rawHTML("iq-raw-source")).join("\n")
+      sourceText: splitLines(rawHTML("iq-raw-source")).join("\n"),
+      knowledge: parseKnowledge(rawHTML("iq-raw-knowledge"))
     };
+  }
+
+  /* 「知识点」：制卡时填的链接（或 Anki 搜索式）。
+     第一行有效，可以写「标题 -> 目标」，也可以只写目标（那标题就用目标本身）。 */
+  function parseKnowledge(html) {
+    var lines = splitLines(html);
+    if (!lines.length) {
+      return null;
+    }
+    var first = lines[0];
+    var label = first;
+    var target = first;
+    var cut = first.indexOf("->");
+    var width = 2;
+    if (cut < 0) {
+      cut = first.indexOf("\u2192");
+      width = 1;
+    }
+    if (cut > 0) {
+      label = trim(first.slice(0, cut));
+      target = trim(first.slice(cut + width));
+    }
+    if (!target) {
+      return null;
+    }
+    return { label: label || target, target: target };
+  }
+
+  function isWebLink(target) {
+    return /^(https?|mailto|file|ftp):/i.test(String(target || ""));
+  }
+
+  /* 答完题后点「相关知识点」：桌面端交给插件（网址开浏览器 / 其它当 Anki 搜索式） */
+  function openKnowledge(target) {
+    return send("iq:open:" + encodeURIComponent(target));
+  }
+
+  function buildKnowledgeNode(data) {
+    var k = data && data.knowledge;
+    if (!k) {
+      return null;
+    }
+    var wrap = el("div", "iq-know");
+    var label = "\ud83d\udcda \u76f8\u5173\u77e5\u8bc6\u70b9\uff1a" + k.label;
+    if (isWebLink(k.target)) {
+      var link = document.createElement("a");
+      link.className = "iq-know-btn";
+      link.setAttribute("href", k.target);
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener");
+      link.appendChild(el("span", "iq-know-text", label));
+      link.addEventListener("click", function (ev) {
+        /* 桌面插件能处理就拦下来，交给系统浏览器；手机上让它自己跳 */
+        if (openKnowledge(k.target) && ev && ev.preventDefault) {
+          ev.preventDefault();
+        }
+      });
+      wrap.appendChild(link);
+    } else {
+      var btn = el("button", "iq-know-btn", label);
+      btn.setAttribute("type", "button");
+      var hosted = hostPresent();
+      btn.addEventListener("click", function () {
+        if (!openKnowledge(k.target) && !hosted) {
+          show(hint, true);
+        }
+      });
+      wrap.appendChild(btn);
+      var hint = el(
+        "div",
+        "iq-know-hint",
+        "\u5728 Anki \u91cc\u641c\uff1a" + k.target
+      );
+      if (hosted) {
+        show(hint, false);
+      }
+      wrap.appendChild(hint);
+    }
+    return wrap;
   }
 
   /* =====================================================================
@@ -1041,6 +1121,11 @@
       src.appendChild(srcBody);
       feedback.appendChild(src);
     }
+    /* 相关知识点：制卡时设的链接，答完题后一键跳过去 */
+    var knowNode = buildKnowledgeNode(api.data);
+    if (knowNode) {
+      feedback.appendChild(knowNode);
+    }
     show(feedback, true);
 
     if (hosted) {
@@ -1329,6 +1414,12 @@
         sbody.innerHTML = data.source;
         src.appendChild(sbody);
       }
+    }
+    /* 相关知识点：答案面也放一个，手机上（没有插件）点网址链接一样能用 */
+    var knowBox = $("iq-knowledge");
+    var knowNode = buildKnowledgeNode(data);
+    if (knowBox && knowNode) {
+      knowBox.appendChild(knowNode);
     }
     show($("iq-answer-block"), data.options.length < 2 && data.answers.length > 0);
   }

@@ -99,6 +99,32 @@ Use Anki's own cloze button or `Ctrl+Shift+C`:
 
 → **two cards**. The same `c` number counts as one card; hints are supported: `{{c1::北京::中国首都}}`.
 
+### 解题技巧: reuse the tip from cards with the same tag
+
+Under the `解题技巧` field there is a **[⚡ 用同标签卡片的技巧]** button. Tag the card (e.g. `唐诗`),
+click it, and the add-on looks for other cards that share a tag **and** already have a tip:
+
+- exactly one match → filled in directly
+- several matches → pick one from the list (sorted by shared tags / recency)
+- no tags on this card yet → it tells you to add one first
+
+Tags you just typed in the tag box count too. Write the tip once per topic and reuse it on every card.
+
+### 知识点: jump to a related page after answering
+
+The new `知识点` field takes one line. After you answer, the card shows a
+**[📚 相关知识点: …]** button that jumps there:
+
+```
+https://en.wikipedia.org/wiki/Quiet_Night_Thoughts    # a web page
+Tang poetry rules -> anki:search:tag:唐诗              # "label -> target"
+```
+
+Web addresses open in your browser; anything else is treated as an **Anki search**
+(`anki:search:…`, `anki:tag:…`, `anki:deck:…`, `anki:note:…`, or a bare `tag:唐诗`)
+and opens in Anki's card browser. The button also appears on the answer side, and on
+the phone web links stay clickable.
+
 ---
 
 ## Reviewing & grading rules

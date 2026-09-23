@@ -463,7 +463,8 @@ function cardHTML(f, side) {
   if (side === "back") {
     back =
       '<div id="iq-answer-block"><div id="iq-answer-list"></div></div>' +
-      '<div id="iq-explanation"></div><div id="iq-tips"></div><div id="iq-source"></div>';
+      '<div id="iq-explanation"></div><div id="iq-tips"></div>' +
+      '<div id="iq-knowledge"></div><div id="iq-source"></div>';
   }
   return (
     '<div class="iq-card" id="iq-card" data-side="' +
@@ -497,6 +498,9 @@ function cardHTML(f, side) {
     "</div>" +
     '<div id="iq-raw-type">' +
     (f.type || "") +
+    "</div>" +
+    '<div id="iq-raw-knowledge">' +
+    (f.knowledge || "") +
     "</div>" +
     "</div>" +
     back
@@ -558,6 +562,9 @@ function run(fields, opts) {
     },
     question: function () {
       return dom.document.getElementById("iq-question");
+    },
+    knowledge: function () {
+      return dom.document.getElementById("iq-knowledge");
     },
     texts: function (list) {
       return Array.prototype.map.call(list, function (n) {
@@ -1093,6 +1100,87 @@ function clozeQuestion() {
   }, { side: "back" });
   eq("S13 背面不插输入框", r.question().querySelectorAll(".iq-input").length, 0);
   eq("S14 背面保留答案文本", r.question().textContent.indexOf("\u674e\u767d") >= 0, true);
+})();
+
+/* V. 相关知识点（制卡时设的链接，答完题后跳过去） */
+function answerFirst(r) {
+  r.fire(r.opts().children[0], "click");
+  var submit = r.controls().querySelector(".iq-submit");
+  if (submit) {
+    r.fire(submit, "click");
+  }
+}
+
+(function () {
+  var r = run({
+    question: "Q",
+    options: "*A. \u7532<br>B. \u4e59",
+    knowledge: "\u9759\u591c\u601d\u5168\u6587 -> https://a.example/x"
+  });
+  answerFirst(r);
+  var btn = r.feedback().querySelector(".iq-know-btn");
+  ok("V1 答完题后出现知识点入口", !!btn);
+  eq("V2 按钮文字用制卡时写的标题", btn.textContent.indexOf("\u9759\u591c\u601d\u5168\u6587") >= 0, true);
+  eq("V3 网址链接带上了 href", btn.getAttribute("href"), "https://a.example/x");
+  r.fire(btn, "click");
+  eq("V4 点它会通知插件打开", r.calls[r.calls.length - 1], "iq:open:" + encodeURIComponent("https://a.example/x"));
+})();
+
+(function () {
+  var r = run({
+    question: "Q",
+    options: "*A. \u7532<br>B. \u4e59",
+    knowledge: "anki:search:tag:\u5510\u8bd7"
+  });
+  answerFirst(r);
+  var btn = r.feedback().querySelector(".iq-know-btn");
+  ok("V5 搜索式也出现入口", !!btn);
+  eq("V6 桌面端不当链接", btn.getAttribute("href"), null);
+  eq("V7 只有目标时按钮文字就是目标", btn.textContent.indexOf("tag:\u5510\u8bd7") >= 0, true);
+  r.fire(btn, "click");
+  eq("V8 点它交给插件搜索", r.calls[r.calls.length - 1], "iq:open:" + encodeURIComponent("anki:search:tag:\u5510\u8bd7"));
+  var hint = r.feedback().querySelector(".iq-know-hint");
+  ok("V9 桌面端不显示「在 Anki 里搜」的提示", !!hint && hint.getAttribute("hidden") !== null);
+})();
+
+(function () {
+  /* 手机（没有插件）：网址直接当链接点，搜索式给一行提示 */
+  var r = run(
+    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "https://a.example/x" },
+    { noHost: true }
+  );
+  answerFirst(r);
+  var btn = r.feedback().querySelector(".iq-know-btn");
+  ok("V10 手机上也显示入口", !!btn);
+  r.fire(btn, "click");
+  eq("V11 手机上不发给插件", r.calls.length, 0);
+
+  var r2 = run(
+    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "tag:\u5510\u8bd7" },
+    { noHost: true }
+  );
+  answerFirst(r2);
+  var hint = r2.feedback().querySelector(".iq-know-hint");
+  ok("V12 手机上搜索式给提示", !!hint && hint.getAttribute("hidden") === null, hint && hint.textContent);
+})();
+
+(function () {
+  /* 答案面也有，手机上翻面就能用 */
+  var r = run(
+    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "\u9759\u591c\u601d -> https://a.example/x" },
+    { side: "back" }
+  );
+  var btn = r.knowledge().querySelector(".iq-know-btn");
+  ok("V13 答案面上也有知识点", !!btn);
+  eq("V14 答案面上的标题对", btn.textContent.indexOf("\u9759\u591c\u601d") >= 0, true);
+})();
+
+(function () {
+  var r = run({ question: "Q", options: "*A. \u7532<br>B. \u4e59" });
+  answerFirst(r);
+  eq("V15 没填知识点就不出现入口", r.feedback().querySelectorAll(".iq-know-btn").length, 0);
+  var rb = run({ question: "Q", options: "*A. \u7532<br>B. \u4e59" }, { side: "back" });
+  eq("V16 答案面同理", rb.knowledge().querySelectorAll(".iq-know-btn").length, 0);
 })();
 
 log.join("\n") + "\n----\nPASS=" + pass + " FAIL=" + fail;
