@@ -37,15 +37,13 @@ STATS_DB_PATH = USER_FILES_DIR / "stats.db"
 # 版本 & 从 GitHub 检查更新
 # --------------------------------------------------------------------------
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # 更新检查从这里拉：https://github.com/creeperboo/anki-interactive-quiz
 UPDATE_REPO = "creeperboo/anki-interactive-quiz"
 UPDATE_BRANCH = "main"
-VERSION_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/version.txt"
-PACKAGE_URL = (
-    f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/interactive_quiz.ankiaddon"
-)
+# 具体下载地址在 _raw_url() / _release_asset_url() 里按 UPDATE_REPO 现算，
+# 免得改了仓库地址之后常量还是旧的（下面这个只用于界面上点「看看有什么新东西」）
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases"
 UPDATE_STATE_PATH = USER_FILES_DIR / "update.json"
 UPDATE_INTERVAL_SECONDS = 86400  # 启动时最多一天查一次
@@ -2028,6 +2026,27 @@ def _repo_ready() -> bool:
     return bool(UPDATE_REPO) and "TODO" not in UPDATE_REPO
 
 
+def _raw_url(name: str) -> str:
+    """raw.githubusercontent 上的文件（版本号、分发包都放这儿）。"""
+    return f"https://raw.githubusercontent.com/{UPDATE_REPO}/{UPDATE_BRANCH}/{name}"
+
+
+def _release_asset_url(name: str) -> str:
+    """最新 Release 的附件地址。
+
+    raw.githubusercontent 偶尔会连着卡住 / 传到一半连接被重置（2026-09-23 实测两次都断在
+    41340 字节），而 Release 附件走的是另一套 CDN，所以当兜底用。
+    """
+    return f"https://github.com/{UPDATE_REPO}/releases/latest/download/{name}"
+
+
+def _download_urls(name: str) -> list[str]:
+    """先 raw，再 Release 附件。"""
+    if not _repo_ready():
+        return []
+    return [_raw_url(name), _release_asset_url(name)]
+
+
 def _fetch(url: str, timeout: int = 10, retries: int = 2) -> bytes:
     """下载一个小文件；分块读 + 失败重试（raw.githubusercontent 偶尔会卡住）。"""
     import urllib.request
@@ -2058,7 +2077,49 @@ def _fetch(url: str, timeout: int = 10, retries: int = 2) -> bytes:
 def fetch_latest_version() -> str:
     if not _repo_ready():
         return ""
-    return _fetch(VERSION_URL, timeout=8).decode("utf-8", "replace").strip()
+    for url in _download_urls("version.txt"):
+        try:
+            text = _fetch(url, timeout=8).decode("utf-8", "replace").strip()
+        except Exception as exc:
+            print(f"[互动答题卡] 取版本号失败（{url}）: {exc}")
+            continue
+        if text:
+            return text
+    return ""
+
+
+def _looks_like_package(data: bytes) -> bool:
+    """下到的东西是不是一个像样的 .ankiaddon（防半截包）。"""
+    if not data or len(data) < 512 or not data.startswith(b"PK"):
+        return False
+    try:
+        import io
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+    except Exception:
+        return False
+    return "manifest.json" in names and "__init__.py" in names
+
+
+def fetch_package() -> bytes:
+    """下载最新的 .ankiaddon；raw 挂了就换 Release 附件。"""
+    last_error: Optional[BaseException] = None
+    for url in _download_urls("interactive_quiz.ankiaddon"):
+        try:
+            data = _fetch(url, timeout=90)
+        except Exception as exc:
+            last_error = exc
+            print(f"[互动答题卡] 下载分发包失败（{url}）: {exc}")
+            continue
+        if _looks_like_package(data):
+            return data
+        last_error = RuntimeError(f"下载到的文件不完整（{len(data)} 字节）")
+        print(f"[互动答题卡] 分发包不完整（{url}，{len(data)} 字节），换个地址再试")
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("没有可用的下载地址")
 
 
 def update_release_url(latest: str) -> str:
@@ -2109,7 +2170,7 @@ def download_and_install_update() -> bool:
     """
     import tempfile
 
-    data = _fetch(PACKAGE_URL, timeout=90)
+    data = fetch_package()
     target = Path(tempfile.gettempdir()) / "interactive_quiz_update.ankiaddon"
     target.write_bytes(data)
 

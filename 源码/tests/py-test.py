@@ -971,6 +971,85 @@ mod._config_cache = None
 mod.check_for_update = _saved_newer
 mod.UPDATE_REPO = _saved_repo
 
+# ------------------------------------------------------------------ 下载兜底（raw 挂了换 Release 附件）
+import io as _io  # noqa: E402
+import zipfile as _zipfile  # noqa: E402
+
+
+def _fake_package_bytes() -> bytes:
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as z:
+        z.writestr("manifest.json", "{}")
+        z.writestr("__init__.py", "# fake")
+        z.writestr("assets/quiz.js", "// pad\n" + "var x = 1;\n" * 100)
+    return buf.getvalue()
+
+
+mod.UPDATE_REPO = "someone/some-repo"
+eq(
+    "P190 raw 优先、Release 附件兜底",
+    mod._download_urls("interactive_quiz.ankiaddon"),
+    [
+        "https://raw.githubusercontent.com/someone/some-repo/main/interactive_quiz.ankiaddon",
+        "https://github.com/someone/some-repo/releases/latest/download/interactive_quiz.ankiaddon",
+    ],
+)
+
+_fetch_calls = []
+_saved_fetch = mod._fetch
+
+
+def _fake_fetch(url, timeout=10, retries=2):
+    _fetch_calls.append(url)
+    if "raw.githubusercontent" in url:
+        raise OSError("connection reset")
+    return b"9.9.9\n"
+
+
+mod._fetch = _fake_fetch
+eq("P191 取版本号会兜底", mod.fetch_latest_version(), "9.9.9")
+ok("P192 两个地址都试过", len(_fetch_calls) == 2, _fetch_calls)
+
+_fetch_calls.clear()
+
+
+def _fake_fetch_short(url, timeout=10, retries=2):
+    _fetch_calls.append(url)
+    if "raw.githubusercontent" in url:
+        return b"PK\x03\x04" + b"\x00" * 600  # 半截包：像 zip 但打不开
+    return _fake_package_bytes()
+
+
+mod._fetch = _fake_fetch_short
+_pkg = mod.fetch_package()
+ok("P193 半截包会被丢掉、换地址重下", _pkg == _fake_package_bytes(), len(_pkg))
+ok("P194 也是两个地址都试", len(_fetch_calls) == 2, _fetch_calls)
+ok("P195 空数据不算包", mod._looks_like_package(b"") is False)
+ok("P196 不是 zip 不算包", mod._looks_like_package(b"hello" * 200) is False)
+
+_fetch_calls.clear()
+mod._fetch = lambda url, timeout=10, retries=2: (_fetch_calls.append(url), _fake_package_bytes())[1]
+ok("P197 第一个地址好了就不试第二个", mod.fetch_package() == _fake_package_bytes() and len(_fetch_calls) == 1)
+
+_install_calls = []
+_saved_install = getattr(mw.addonManager, "install", None)
+
+
+class _InstallOk:
+    pass
+
+
+mw.addonManager.install = lambda path, *a, **k: (_install_calls.append(path), _InstallOk())[1]
+mod._fetch = lambda url, timeout=10, retries=2: _fake_package_bytes()
+ok("P198 下载安装整体能走通", mod.download_and_install_update() is True)
+ok("P199 装的是下载下来的那个包", len(_install_calls) == 1)
+if _saved_install is None:
+    del mw.addonManager.install
+else:
+    mw.addonManager.install = _saved_install
+mod._fetch = _saved_fetch
+mod.UPDATE_REPO = _saved_repo
+
 # ------------------------------------------------------------------ 更新提示里的 Release 链接
 mod.UPDATE_REPO = "someone/some-repo"
 eq(
