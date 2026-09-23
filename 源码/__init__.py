@@ -2104,16 +2104,21 @@ def _looks_like_package(data: bytes) -> bool:
 
 
 def fetch_package() -> bytes:
-    """下载最新的 .ankiaddon；raw 挂了就换 Release 附件。"""
+    """下载最新的 .ankiaddon；raw 挂了（传一半断掉 / 超时）就换 Release 附件。
+
+    超时给得短一点（25 秒、重试 1 次）：raw 卡住的时候没必要让用户等好几分钟，
+    早点换到 Release 附件那把 CDN 上去。
+    """
     last_error: Optional[BaseException] = None
     for url in _download_urls("interactive_quiz.ankiaddon"):
         try:
-            data = _fetch(url, timeout=90)
+            data = _fetch(url, timeout=25, retries=1)
         except Exception as exc:
             last_error = exc
             print(f"[互动答题卡] 下载分发包失败（{url}）: {exc}")
             continue
         if _looks_like_package(data):
+            print(f"[互动答题卡] 分发包下载成功（{url}，{len(data)} 字节）")
             return data
         last_error = RuntimeError(f"下载到的文件不完整（{len(data)} 字节）")
         print(f"[互动答题卡] 分发包不完整（{url}，{len(data)} 字节），换个地址再试")
