@@ -26,6 +26,8 @@
   API.built = false;
   /* 字段名 -> 当前内容（纯文本）。由插件在注入时给初值，之后我们自己的改动同步更新。 */
   API.values = API.values || {};
+  /* 被我们整块藏起来的字段容器（选项、以及删不掉的「答案」） */
+  API.hiddenAreas = API.hiddenAreas || [];
 
   /* ---------------- 小工具 ---------------- */
 
@@ -146,12 +148,26 @@
     }
     var names = API.cfg.fields || [];
     API.native = {};
+    API.raw = {};
     for (var i = 0; i < names.length; i++) {
       if (values.length > i) {
+        API.raw[names[i]] = values[i] === null || values[i] === undefined ? "" : String(values[i]);
         API.native[names[i]] = htmlToText(values[i]);
       }
     }
     return true;
+  };
+
+  /* 原始（未去标签）字段值：判断题的隐藏标记要靠它才找得到 */
+  API.raw = API.raw || {};
+
+  API.rawText = function (name) {
+    if (API.raw && Object.prototype.hasOwnProperty.call(API.raw, name)) {
+      var v = API.raw[name];
+      return v === null || v === undefined ? "" : String(v);
+    }
+    var area = API.area(name);
+    return area ? String(area.value === null || area.value === undefined ? "" : area.value) : "";
   };
 
   /* 把字段内容送回插件（插件再用页面自己的 setFields 写回 Anki） */
@@ -284,6 +300,12 @@
     ".iq-ed-panel-title{font-weight:600;font-size:.85rem;}",
     ".iq-ed-panel-text{font-size:.82rem;opacity:.85;white-space:pre-wrap;}",
     ".iq-ed-panel-tags{font-size:.75rem;opacity:.6;}",
+    ".iq-ed-knowrow{align-items:center;}",
+    ".iq-ed-knowrow-name{flex:0 0 auto;max-width:9rem;overflow:hidden;text-overflow:ellipsis;",
+    "white-space:nowrap;font-size:.82rem;font-weight:600;}",
+    ".iq-ed-knowrow-input{flex:1 1 auto;min-width:6rem;padding:.25rem .5rem;font:inherit;",
+    "font-size:.82rem;border:1px solid rgba(128,128,128,.5);border-radius:6px;background:transparent;color:inherit;}",
+    ".iq-ed-knowrow-input:focus{outline:none;border-color:#3b6ef6;}",
   ].join("");
 
   function ensureStyle() {
@@ -330,7 +352,9 @@
     var node = fieldContainer(area);
     if (node) {
       hide(node);
-      API.hiddenArea = node;
+      if (API.hiddenAreas.indexOf(node) < 0) {
+        API.hiddenAreas.push(node);
+      }
     }
     return node;
   }
@@ -653,14 +677,45 @@
 
   /* ---------------- 判断题：一个勾选框 ---------------- */
 
+  /* 判断题的真值存在「题目」末尾的隐藏标记里：<!--iq-tf:对--> */
+  function tfFlagFromHtml(html) {
+    var match = /<!--\s*iq-tf\s*[:：]\s*([^\s>\-]*)\s*-->/i.exec(String(html || ""));
+    if (!match) {
+      return "";
+    }
+    var flag = match[1].replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
+    return flag === "\u5bf9" || flag === "\u9519" ? flag : "";
+  }
+
+  function currentTfFlag() {
+    var fromQuestion = tfFlagFromHtml(API.rawText("\u9898\u76ee"));
+    if (fromQuestion) {
+      return fromQuestion;
+    }
+    /* 插件写完会推最新值回来；推送还没到之前先认本地这次点的 */
+    return API.tfLocal || "";
+  }
+
+  function sendTfFlag(flag) {
+    API.tfLocal = flag;
+    if (typeof pycmd !== "function") {
+      return false;
+    }
+    try {
+      pycmd("iq:editor:tf:" + encodeURIComponent(flag));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function buildTrueFalse(area) {
-    hideFieldContainer(area);
     var host = hostAfter(area);
-    var truth = tfValue(API.fieldText("\u7b54\u6848"));
+    var truth = currentTfFlag();
     var wrapper = el("label", "iq-ed-tf");
     var box = el("input", "iq-ed-box");
     box.setAttribute("type", "checkbox");
-    box.checked = truth === true;
+    box.checked = truth === "\u5bf9";
     wrapper.appendChild(box);
     wrapper.appendChild(el("span", "iq-ed-tf-text", "\u8fd9\u9898\u662f\u6b63\u786e\u7684"));
     host.appendChild(wrapper);
@@ -668,20 +723,21 @@
     host.appendChild(hint);
 
     function paint() {
-      var value = tfValue(API.fieldText("\u7b54\u6848"));
-      box.checked = value === true;
+      var flag = currentTfFlag();
+      box.checked = flag === "\u5bf9";
       hint.textContent =
-        value === true
+        flag === "\u5bf9"
           ? "\u5f53\u524d\uff1a\u5bf9"
-          : value === false
+          : flag === "\u9519"
           ? "\u5f53\u524d\uff1a\u9519"
           : "\u8fd8\u6ca1\u8bbe\u7f6e\uff1a\u52fe\u4e0a = \u5bf9\uff0c\u4e0d\u52fe = \u9519";
     }
 
     box.addEventListener("change", function () {
-      commitField("\u7b54\u6848", box.checked ? "\u5bf9" : "\u9519");
+      sendTfFlag(box.checked ? "\u5bf9" : "\u9519");
       paint();
     });
+    API.paintTf = paint;
     paint();
   }
 
@@ -736,8 +792,15 @@
     if (!API.cfg || !values || !API.setNative(values)) {
       return false;
     }
+    /* 插件推来了带标记的题目：本地的临时猜测可以让位了 */
+    if (tfFlagFromHtml(API.rawText("\u9898\u76ee"))) {
+      API.tfLocal = "";
+    }
     paintClozeStatus(API.nativeText("\u9898\u76ee"));
     paintKnowledge();
+    if (API.paintTf) {
+      API.paintTf();
+    }
     return true;
   };
 
@@ -846,11 +909,6 @@
       barHint(bar, "\u540c\u6807\u7b7e\u7684\u5361\u7247\u91cc\u8fd8\u6ca1\u6709\u300c\u89e3\u9898\u6280\u5de7\u300d");
       return false;
     }
-    if (items.length === 1) {
-      commitField("\u89e3\u9898\u6280\u5de7", items[0].tip);
-      barHint(bar, "\u5df2\u586b\u5165\uff1a" + items[0].title);
-      return true;
-    }
     var panel = el("div", "iq-ed-panel");
     panel.setAttribute("id", "iq-ed-tipspanel");
     for (var i = 0; i < items.length; i++) {
@@ -869,14 +927,14 @@
     row.appendChild(
       miniButton("\u7528\u8fd9\u6761", function () {
         commitField("\u89e3\u9898\u6280\u5de7", item.tip);
-        barHint(bar, "\u5df2\u586b\u5165\uff1a" + item.title);
+        barHint(bar, "\u5df2\u586b\u5165");
         if (panel.parentNode) {
           panel.parentNode.removeChild(panel);
         }
       })
     );
+    /* 只显示技巧正文 + 共同标签：不再显示题目 */
     var body = el("div", "iq-ed-panel-body");
-    body.appendChild(el("div", "iq-ed-panel-title", item.title || ""));
     body.appendChild(el("div", "iq-ed-panel-text", item.tip || ""));
     if (item.tags && item.tags.length) {
       body.appendChild(el("div", "iq-ed-panel-tags", "\ud83c\udff7 " + item.tags.join(" \u00b7 ")));
@@ -885,18 +943,18 @@
     panel.appendChild(row);
   }
 
-  /* ---------------- 知识点：预览 + 试打开 ---------------- */
+  /* ---------------- 知识点：标签 -> 链接（逐行配，卡片上点标签跳转） ---------------- */
 
-  function knowledgeFrom(text) {
-    var lines = String(text === null || text === undefined ? "" : text).split(/\r\n|\r|\n/);
-    var first = "";
-    for (var i = 0; i < lines.length; i++) {
-      var s = lines[i].replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
-      if (s) {
-        first = s;
-        break;
-      }
-    }
+  function trimSpace(text) {
+    return String(text === null || text === undefined ? "" : text).replace(
+      /^[\s\u00a0]+|[\s\u00a0]+$/g,
+      ""
+    );
+  }
+
+  /* 一行「标签 -> 链接」；只写链接没有标签的老写法也认（bare = true） */
+  function knowledgeLine(text) {
+    var first = trimSpace(text);
     if (!first) {
       return null;
     }
@@ -909,45 +967,264 @@
       width = 1;
     }
     if (cut > 0) {
-      label = first.slice(0, cut).replace(/[\s\u00a0]+$/, "");
-      target = first.slice(cut + width).replace(/^[\s\u00a0]+/, "");
+      label = trimSpace(first.slice(0, cut));
+      target = trimSpace(first.slice(cut + width));
+      if (target) {
+        return { label: label || target, target: target, bare: false };
+      }
     }
-    if (!target) {
-      target = first;
-      label = first;
+    return { label: first, target: first, bare: true };
+  }
+
+  /* 字段里所有有效行（标签重复只留第一条），顺序就是卡片上标签的顺序 */
+  function knowledgeItems() {
+    var lines = String(API.nativeText("\u77e5\u8bc6\u70b9") || "").split(/\r\n|\r|\n/);
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < lines.length; i++) {
+      var item = knowledgeLine(lines[i]);
+      if (!item || !item.target) {
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(seen, item.label)) {
+        continue;
+      }
+      seen[item.label] = true;
+      out.push(item);
     }
-    return { label: label || target, target: target };
+    return out;
   }
 
   API.knowledge = function () {
-    return knowledgeFrom(API.nativeText("\u77e5\u8bc6\u70b9"));
+    return knowledgeItems();
   };
 
-  API.knowledgeTarget = function () {
-    var k = API.knowledge();
-    return k ? k.target : "";
-  };
+  /* 这张卡当前的标签：标签框里那份是新的（可能还没提交），插件给的那份兜底 */
+  function tagList() {
+    var out = currentTags();
+    var saved = (API.cfg && API.cfg.tags) || [];
+    for (var i = 0; i < saved.length; i++) {
+      var tag = trimSpace(saved[i]);
+      if (tag && out.indexOf(tag) < 0) {
+        out.push(tag);
+      }
+    }
+    return out;
+  }
 
-  function paintKnowledge() {
+  /* 面板行 = 标签（前面）+ 字段里的其它行（后面，老内容一律保留） */
+  function knowledgeRows() {
+    var tags = tagList();
+    var items = knowledgeItems();
+    var rows = [];
+    var used = {};
+    for (var i = 0; i < tags.length; i++) {
+      var tag = tags[i];
+      if (used[tag]) {
+        continue;
+      }
+      used[tag] = true;
+      var hit = null;
+      for (var j = 0; j < items.length; j++) {
+        if (items[j].label === tag) {
+          hit = items[j];
+          break;
+        }
+      }
+      rows.push({
+        label: tag,
+        target: hit ? hit.target : "",
+        bare: hit ? hit.bare : false,
+        isTag: true,
+      });
+    }
+    for (var k = 0; k < items.length; k++) {
+      if (used[items[k].label]) {
+        continue;
+      }
+      used[items[k].label] = true;
+      rows.push({
+        label: items[k].label,
+        target: items[k].target,
+        bare: items[k].bare,
+        isTag: false,
+      });
+    }
+    return rows;
+  }
+
+  /* 收起来时那一行预览：卡片上会显示哪些标签 */
+  function paintKnowledgeHint() {
     var hint = document.getElementById ? document.getElementById("iq-ed-knowhint") : null;
     if (!hint) {
-      return;
+      return false;
     }
-    var btn = document.getElementById ? document.getElementById("iq-ed-knowtest") : null;
-    var k = API.knowledge();
-    if (!k) {
-      hint.textContent =
-        "\u8fd8\u6ca1\u586b\uff1a\u7b2c\u4e00\u884c\u5199\u7f51\u5740\uff0c\u6216\u300c\u6807\u9898 -> anki:search:\u6807\u7b7e\u300d";
-      if (btn) {
-        btn.setAttribute("disabled", "disabled");
+    var items = knowledgeItems();
+    if (!items.length) {
+      hint.textContent = tagList().length
+        ? "\u8fd8\u6ca1\u914d\uff1a\u70b9 [\ud83c\udff7 \u914d\u7f6e\u6807\u7b7e\u94fe\u63a5]\uff0c\u7ed9\u6807\u7b7e\u9010\u4e2a\u586b\u94fe\u63a5"
+        : "\u8fd8\u6ca1\u914d\uff1a\u5148\u5728\u4e0b\u9762\u7684\u6807\u7b7e\u6846\u52a0\u6807\u7b7e\uff0c\u518d\u70b9 [\ud83c\udff7 \u914d\u7f6e\u6807\u7b7e\u94fe\u63a5]";
+      return false;
+    }
+    var labels = [];
+    for (var i = 0; i < items.length; i++) {
+      labels.push(items[i].label);
+    }
+    hint.textContent = "\u5361\u7247\u4e0a\u4f1a\u663e\u793a\uff1a" + labels.join(" \u00b7 ");
+    return true;
+  }
+
+  /* 面板里当前每行输入框的内容（刷新标签时保留刚打进去、还没提交的） */
+  function knowInputs(panel) {
+    var out = {};
+    if (!panel) {
+      return out;
+    }
+    var rows = panel.querySelectorAll(".iq-ed-knowrow");
+    for (var i = 0; i < rows.length; i++) {
+      var name = rows[i].querySelector(".iq-ed-knowrow-name");
+      var input = rows[i].querySelector(".iq-ed-knowrow-input");
+      if (name && input) {
+        out[String(name.textContent || "")] = String(input.value === null || input.value === undefined ? "" : input.value);
       }
-      return;
     }
-    var kind = /^(https?|mailto|file|ftp):/i.test(k.target) ? "\u7f51\u5740" : "Anki \u641c\u7d22";
-    hint.textContent = "\u6309\u94ae\u4f1a\u663e\u793a\uff1a" + k.label + "\uff08" + kind + "\uff09";
-    if (btn) {
-      btn.removeAttribute("disabled");
+    return out;
+  }
+
+  function buildKnowledgeRow(panel, bar, row, typed) {
+    var node = el("div", "iq-ed-panel-row iq-ed-knowrow");
+    node.setAttribute("data-bare", row.bare ? "1" : "0");
+    node.appendChild(el("div", "iq-ed-knowrow-name", row.label));
+    var input = el("input", "iq-ed-knowrow-input");
+    input.setAttribute("type", "text");
+    input.setAttribute("placeholder", "\u7f51\u5740\uff0c\u6216 anki:search:tag:\u2026");
+    var value = row.target || "";
+    if (typed && Object.prototype.hasOwnProperty.call(typed, row.label)) {
+      value = typed[row.label];
     }
+    input.value = value;
+    input.addEventListener("blur", function () {
+      commitKnowledge();
+    });
+    input.addEventListener("keydown", function (ev) {
+      if (ev && (ev.key === "Enter" || ev.keyCode === 13)) {
+        if (ev.preventDefault) {
+          ev.preventDefault();
+        }
+        commitKnowledge();
+      }
+    });
+    node.appendChild(input);
+    node.appendChild(
+      miniButton("\u8bd5\u6253\u5f00", function () {
+        var target = trimSpace(input.value);
+        if (!target) {
+          barHint(bar, "\u8fd9\u4e00\u884c\u8fd8\u6ca1\u586b\u94fe\u63a5");
+          return;
+        }
+        if (typeof pycmd === "function") {
+          try {
+            pycmd("iq:editor:open:" + encodeURIComponent(target));
+            return;
+          } catch (e) {
+            /* 落到下面的兜底 */
+          }
+        }
+        if (typeof window.open === "function" && /^(https?|mailto):/i.test(target)) {
+          try {
+            window.open(target, "_blank");
+          } catch (e) {
+            /* 忽略 */
+          }
+        }
+      })
+    );
+    node.appendChild(
+      miniButton("\u00d7", function () {
+        input.value = "";
+        if (node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+        commitKnowledge();
+        barHint(bar, "\u5df2\u79fb\u9664\uff1a" + row.label);
+      })
+    );
+    panel.appendChild(node);
+  }
+
+  /* 重新画面板（默认可选 typed 保留正在输入的内容） */
+  function paintKnowledgeRows(typed) {
+    var bar = document.getElementById ? document.getElementById("iq-ed-knowbar") : null;
+    if (!bar) {
+      return null;
+    }
+    var old = document.getElementById ? document.getElementById("iq-ed-knowpanel") : null;
+    if (old && old.parentNode) {
+      old.parentNode.removeChild(old);
+    }
+    var panel = el("div", "iq-ed-panel iq-ed-knowpanel");
+    panel.setAttribute("id", "iq-ed-knowpanel");
+    var rows = knowledgeRows();
+    for (var i = 0; i < rows.length; i++) {
+      buildKnowledgeRow(panel, bar, rows[i], typed);
+    }
+    if (!rows.length) {
+      panel.appendChild(
+        el(
+          "div",
+          "iq-ed-bar-hint",
+          "\u8fd9\u5f20\u5361\u8fd8\u6ca1\u6709\u6807\u7b7e\uff1a\u5148\u5728\u4e0b\u9762\u7684\u6807\u7b7e\u6846\u52a0\u4e0a\uff0c\u518d\u70b9\u53f3\u8fb9\u7684\u5237\u65b0"
+        )
+      );
+    }
+    var foot = el("div", "iq-ed-panel-row");
+    foot.appendChild(
+      miniButton("\ud83d\udd04 \u5237\u65b0\u6807\u7b7e", function () {
+        paintKnowledgeRows(knowInputs(panel));
+      })
+    );
+    panel.appendChild(foot);
+    bar.appendChild(panel);
+    return panel;
+  }
+
+  /* 把面板里填好的行写回「知识点」字段：一行一条「标签 -> 链接」 */
+  function commitKnowledge() {
+    var panel = document.getElementById ? document.getElementById("iq-ed-knowpanel") : null;
+    if (!panel) {
+      return false;
+    }
+    var rows = panel.querySelectorAll(".iq-ed-knowrow");
+    var lines = [];
+    for (var i = 0; i < rows.length; i++) {
+      var name = rows[i].querySelector(".iq-ed-knowrow-name");
+      var input = rows[i].querySelector(".iq-ed-knowrow-input");
+      var label = name ? String(name.textContent || "") : "";
+      var target = input ? trimSpace(input.value) : "";
+      if (!target) {
+        continue;
+      }
+      var bare = rows[i].getAttribute("data-bare") === "1";
+      lines.push(bare || !label ? target : label + " -> " + target);
+    }
+    var text = lines.join("\n");
+    var saved = commitField("\u77e5\u8bc6\u70b9", text);
+    if (saved) {
+      /* 宿主马上会把字段推回来；这里先自己同步一份，免得预览还是旧的 */
+      API.native["\u77e5\u8bc6\u70b9"] = text;
+    }
+    paintKnowledgeHint();
+    return saved;
+  }
+
+  /* 面板开着就跟着刷新行（保留正在输入的内容），收着只刷新预览行 */
+  function paintKnowledge() {
+    var hasItems = paintKnowledgeHint();
+    var panel = document.getElementById ? document.getElementById("iq-ed-knowpanel") : null;
+    if (panel) {
+      paintKnowledgeRows(knowInputs(panel));
+    }
+    return hasItems;
   }
 
   function watchField(index, onInput) {
@@ -998,28 +1275,19 @@
       return;
     }
     var bar = barHost(container, "iq-ed-knowbar");
-    var btn = miniButton("\u8bd5\u6253\u5f00", function () {
-      var target = API.knowledgeTarget();
-      if (!target) {
+    /* 默认收起：点一下才排出「标签 + 链接」的行 */
+    var btn = miniButton("\ud83c\udff7 \u914d\u7f6e\u6807\u7b7e\u94fe\u63a5", function () {
+      var panel = document.getElementById ? document.getElementById("iq-ed-knowpanel") : null;
+      if (panel) {
+        if (panel.parentNode) {
+          panel.parentNode.removeChild(panel);
+        }
+        paintKnowledgeHint();
         return;
       }
-      if (typeof pycmd === "function") {
-        try {
-          pycmd("iq:editor:open:" + encodeURIComponent(target));
-          return;
-        } catch (e) {
-          /* 落到下面的兜底 */
-        }
-      }
-      if (typeof window.open === "function" && /^(https?|mailto):/i.test(target)) {
-        try {
-          window.open(target, "_blank");
-        } catch (e) {
-          /* 忽略 */
-        }
-      }
+      paintKnowledgeRows(null);
     });
-    btn.setAttribute("id", "iq-ed-knowtest");
+    btn.setAttribute("id", "iq-ed-knowtoggle");
     bar.appendChild(btn);
     var hint = el("div", "iq-ed-bar-hint");
     hint.setAttribute("id", "iq-ed-knowhint");
@@ -1032,11 +1300,29 @@
     if (!API.cfg || !API.cfg.mode) {
       return;
     }
+    hideLeftoverAnswerField();
     if (!document.getElementById || !document.getElementById("iq-ed-tipsbar")) {
       buildTipsBar();
     }
     if (!document.getElementById || !document.getElementById("iq-ed-knowbar")) {
       buildKnowledgeBar();
+    }
+  }
+
+  /* 1.1.4：题型里万一还残留着「答案」字段（Anki 接口不肯删时），在编辑器里整块藏起来，
+     保证「添加卡片」窗口里看不到它。字段已经删掉时这里是空转。 */
+  function hideLeftoverAnswerField() {
+    var mode = API.cfg ? API.cfg.mode : "";
+    if (mode !== "choice" && mode !== "tf" && mode !== "cloze") {
+      return;
+    }
+    if (API.index("\u7b54\u6848") < 0) {
+      return;
+    }
+    var area = API.area("\u7b54\u6848");
+    var node = area ? fieldContainer(area) : null;
+    if (node && API.hiddenAreas.indexOf(node) < 0) {
+      hideFieldContainer(area);
     }
   }
 
@@ -1062,7 +1348,7 @@
     if (old && old.parentNode) {
       old.parentNode.removeChild(old);
     }
-    API.hiddenArea = null;
+    API.hiddenAreas = [];
     API.rows = [];
     API.list = null;
     API.status = null;
@@ -1077,9 +1363,9 @@
           API.built = true;
         }
       } else if (mode === "tf") {
-        var answerArea = API.area("\u7b54\u6848");
-        if (answerArea) {
-          buildTrueFalse(answerArea);
+        var questionArea = API.area("\u9898\u76ee");
+        if (questionArea) {
+          buildTrueFalse(questionArea);
           API.built = true;
         }
       } else if (mode === "cloze") {
@@ -1118,14 +1404,18 @@
       if (!API.cfg || !API.cfg.mode) {
         return;
       }
-      var hidden = API.hiddenArea;
-      var stillHidden =
-        hidden &&
-        hidden.parentNode &&
-        ((hidden.style && hidden.style.display === "none") ||
-          (hidden.classList && hidden.classList.contains && hidden.classList.contains("iq-hidden")));
-      if (hidden && hidden.parentNode && !stillHidden) {
-        hide(hidden);
+      for (var h = 0; h < API.hiddenAreas.length; h++) {
+        var hidden = API.hiddenAreas[h];
+        var stillHidden =
+          hidden &&
+          hidden.parentNode &&
+          ((hidden.style && hidden.style.display === "none") ||
+            (hidden.classList &&
+              hidden.classList.contains &&
+              hidden.classList.contains("iq-hidden")));
+        if (hidden && hidden.parentNode && !stillHidden) {
+          hide(hidden);
+        }
       }
       if (!document.getElementById("iq-ed-host")) {
         API.build();
@@ -1156,6 +1446,8 @@
     API.cfg = cfg || null;
     API.values = {};
     API.native = {};
+    API.raw = {};
+    API.tfLocal = "";
     if (API.cfg && API.cfg.values) {
       API.setValues(API.cfg.values);
       API.setNative(API.cfg.values);

@@ -32,12 +32,13 @@ ADDON_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = ADDON_DIR / "assets"
 USER_FILES_DIR = ADDON_DIR / "user_files"
 STATS_DB_PATH = USER_FILES_DIR / "stats.db"
+MIGRATION_REPORT_PATH = USER_FILES_DIR / "migration.json"
 
 # --------------------------------------------------------------------------
 # 版本 & 从 GitHub 检查更新
 # --------------------------------------------------------------------------
 
-__version__ = "1.1.1"
+__version__ = "1.1.6"
 
 # 更新检查从这里拉：https://github.com/creeperboo/anki-interactive-quiz
 UPDATE_REPO = "creeperboo/anki-interactive-quiz"
@@ -60,16 +61,22 @@ CONFIG_MARKER = "/*ANKI_QUIZ_CONFIG_MARKER*/"
 # 「知识点」：卡里放一个链接（或 Anki 搜索式），答完题后可以一键跳过去
 KNOWLEDGE_FIELD = "知识点"
 
+# 判断题的真值（对/错）从 1.1.3 起存在「题目」末尾的隐藏标记里，不再用「答案」字段。
+# 标记长这样：题目正文<!--iq-tf:对--> —— 卡片上看不见，html_to_text 也会把整段注释去掉，
+# 所以搜索、排序字段（sfld）、卷面都不会露出来。
+TF_FLAG_RE = re.compile(r"<!--\s*iq-tf\s*[:：]\s*([^\s>\-]*)\s*-->", re.I)
+TF_FLAGS_PATH = USER_FILES_DIR / "tf_flags.json"
+
 # 每个题型各自独立，字段也各自独立
 CHOICE_NOTE_TYPE_NAME = "互动答题卡·选择题"
 CHOICE_CARD_NAME = "选择"
-# 选择题的正误直接标在「选项」行里，不需要「答案」字段
+# 1.1.3 起三个题型都不再要「答案」字段了（详见 migrate_answer_fields()）
 CHOICE_FIELD_NAMES = ["题目", "选项", "解析", "解题技巧", "来源", KNOWLEDGE_FIELD]
 
 TF_NOTE_TYPE_NAME = "互动答题卡·判断题"
 TF_CARD_NAME = "判断"
-# 判断题的「答案」字段还在（勾选框要往里写 对/错），只是编辑器里被藏起来
-TF_FIELD_NAMES = ["题目", "答案", "解析", "解题技巧", "来源", KNOWLEDGE_FIELD]
+# 判断题的对/错存在「题目」的隐藏标记里（编辑器里只有一个勾选框）
+TF_FIELD_NAMES = ["题目", "解析", "解题技巧", "来源", KNOWLEDGE_FIELD]
 
 # 原生填空（cloze）题型：跟 Anki 自带的「填空题」一样，题目里写 {{c1::答案}}，
 # 一个 c 号出一张卡；编辑器里也能直接用挖空按钮 / Ctrl+Shift+C。
@@ -116,6 +123,8 @@ _menu_installed = False
 _asset_cache: dict[str, str] = {}
 _config_cache: Optional[dict[str, Any]] = None
 _config_cached_at = 0.0
+# ensure_* 里顺手删掉的字段（"题型/字段名"），最后一起写进整理报告
+_ensure_removed: list[str] = []
 _CONFIG_TTL = 1.0
 
 
@@ -205,6 +214,7 @@ def _html_to_text(text: Any) -> str:
 
 # 字段名 -> 隐藏区里的 id，卡片端脚本按这些 id 读原始内容
 _RAW_IDS = {
+    "题目": "iq-raw-question",
     "选项": "iq-raw-options",
     "答案": "iq-raw-answer",
     "解析": "iq-raw-explanation",
@@ -215,10 +225,13 @@ _RAW_IDS = {
 }
 
 
-def _raw_block(field_names: list[str]) -> str:
+def _raw_block(field_names: list[str], question_raw: bool = False) -> str:
     """把字段原样塞进一个隐藏 div，卡片端脚本从里面读内容。"""
     lines = ['<div id="iq-raw" hidden="hidden">']
     for name in field_names:
+        if name == "题目" and not question_raw:
+            # 题目一般只看渲染出来的那份；判断题要在里面找隐藏标记，才多留一份
+            continue
         raw_id = _RAW_IDS.get(name)
         if raw_id:
             lines.append('  <div id="%s">{{%s}}</div>' % (raw_id, name))
@@ -226,7 +239,9 @@ def _raw_block(field_names: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _card_bodies(field_names: list[str], cloze: bool = False) -> tuple[str, str]:
+def _card_bodies(
+    field_names: list[str], cloze: bool = False, question_raw: bool = False
+) -> tuple[str, str]:
     """正面 / 背面模板。所有题型共用同一套结构，只是字段和「题目」的渲染方式不同。
 
     原生填空用 Anki 自己的 {{cloze:题目}}：当前空位渲染成
@@ -236,7 +251,7 @@ def _card_bodies(field_names: list[str], cloze: bool = False) -> tuple[str, str]
     question = "{{cloze:题目}}" if cloze else "{{题目}}"
     attrs = ' data-iq-cloze="1"' if cloze else ""
     cloze_script = ("<script>%s</script>" % CLOZE_MARKER) if cloze else ""
-    raw = _raw_block(field_names)
+    raw = _raw_block(field_names, question_raw)
     front = (
         '<div class="iq-card" id="iq-card" data-side="front"%s>\n'
         '  <div class="iq-question" id="iq-question">%s</div>\n'
@@ -254,8 +269,6 @@ def _card_bodies(field_names: list[str], cloze: bool = False) -> tuple[str, str]
         '<div class="iq-card" id="iq-card" data-side="back"%s>\n'
         '  <div class="iq-question" id="iq-question">%s</div>\n'
         '  <div class="iq-options" id="iq-options"></div>\n'
-        '  <div id="iq-answer-block"><div class="iq-block-title">答案</div>'
-        '<div id="iq-answer-list"></div></div>\n'
         '  <div class="iq-explain" id="iq-explanation"></div>\n'
         '  <div class="iq-explain iq-tips" id="iq-tips"></div>\n'
         '  <div class="iq-explain iq-knowledge" id="iq-knowledge"></div>\n'
@@ -269,10 +282,12 @@ def _card_bodies(field_names: list[str], cloze: bool = False) -> tuple[str, str]
     return front, back
 
 
-def build_templates(field_names: Optional[list[str]] = None, cloze: bool = False) -> tuple[str, str, str]:
+def build_templates(
+    field_names: Optional[list[str]] = None, cloze: bool = False, question_raw: bool = False
+) -> tuple[str, str, str]:
     js = _read_asset("quiz.js")
     css = _read_asset("quiz.css")
-    front, back = _card_bodies(list(field_names or FIELD_NAMES), cloze)
+    front, back = _card_bodies(list(field_names or FIELD_NAMES), cloze, question_raw)
     return (
         front.replace("{{__IQ_JS__}}", js),
         back.replace("{{__IQ_JS__}}", js),
@@ -309,8 +324,9 @@ def _ensure_note_type(
     card_name: str,
     cloze: bool = False,
     drop_extra_fields: bool = False,
+    question_raw: bool = False,
 ) -> bool:
-    """创建或更新一个题型（四个题型共用这一条逻辑）。"""
+    """创建或更新一个题型（三个题型共用这一条逻辑）。"""
     col = getattr(mw, "col", None)
     if col is None:
         return False
@@ -318,7 +334,7 @@ def _ensure_note_type(
     if models is None:
         return False
 
-    front, back, css = build_templates(field_names, cloze)
+    front, back, css = build_templates(field_names, cloze, question_raw)
     nt = models.by_name(name)
     created = nt is None
     if created:
@@ -376,8 +392,36 @@ def _ensure_note_type(
     return True
 
 
+def _field_nonempty_notes(col: Any, nt: Any, field: str) -> Optional[int]:
+    """直接逐条读这个题型的笔记，数出「这一格有内容」的条数；读不出来返回 None。
+
+    比 `字段:_*` 搜索可靠：不依赖搜索语法和索引，题型没有笔记时也能立刻得出 0。
+    """
+    names = [f.get("name") for f in nt.get("flds", []) or []]
+    if field not in names:
+        return 0
+    index = names.index(field)
+    try:
+        nids = list(col.find_notes('note:"%s"' % nt.get("name", "")))
+    except Exception:
+        return None
+    count = 0
+    for nid in nids:
+        try:
+            note = col.get_note(nid)
+            value = note.fields[index]
+        except Exception:
+            return None
+        if str(value).strip():
+            count += 1
+    return count
+
+
 def _field_has_values(col: Any, nt: Any, field: str) -> bool:
     """这个字段里还有没有内容（查不出来就当有，宁可不删）。"""
+    count = _field_nonempty_notes(col, nt, field)
+    if count is not None:
+        return count > 0
     try:
         return bool(col.find_notes('note:"%s" %s:_*' % (nt["name"], field)))
     except Exception:
@@ -385,7 +429,8 @@ def _field_has_values(col: Any, nt: Any, field: str) -> bool:
 
 
 def _drop_unused_fields(models: Any, col: Any, nt: Any, keep: list[str]) -> None:
-    """删掉不再需要的字段（目前只有废弃的「类型」）。字段里还有内容就留着。"""
+    """删掉不再需要的字段（废弃的「类型」、1.1.3 起不要的「答案」）。字段里还有内容就留着。"""
+    type_name = nt.get("name") if isinstance(nt, dict) else "?"
     for field in list(nt.get("flds", [])):
         name = field.get("name")
         if name in keep:
@@ -393,10 +438,271 @@ def _drop_unused_fields(models: Any, col: Any, nt: Any, keep: list[str]) -> None
         if _field_has_values(col, nt, name):
             print(f"[互动答题卡] 「{name}」字段还有内容，先不删")
             continue
+        remove = getattr(models, "remove_field", None)
+        if not callable(remove):
+            continue
         try:
-            models.remove_field(nt, field)
+            remove(nt, field)
+            _ensure_removed.append("%s/%s" % (type_name, name))
+            print(f"[互动答题卡] 已从「{type_name}」删掉「{name}」字段")
         except Exception as exc:
             print(f"[互动答题卡] 删除字段「{name}」失败: {exc}")
+
+
+def _field_named(nt: Any, name: str) -> Optional[dict[str, Any]]:
+    for field in nt.get("flds", []) or []:
+        if field.get("name") == name:
+            return field
+    return None
+
+
+def _clear_prevent_deletion(models: Any, nt: Any, field: dict[str, Any]) -> bool:
+    """字段配置里若带「禁止删除」，先清掉（新旧两种键都看一眼）并保存题型。"""
+    changed = False
+    for key in ("preventDeletion", "prevent_deletion"):
+        if field.get(key):
+            field[key] = False
+            changed = True
+    config = field.get("config")
+    if isinstance(config, dict) and config.get("prevent_deletion"):
+        config["prevent_deletion"] = False
+        changed = True
+    if changed:
+        _save_model(models, nt)
+    return changed
+
+
+def drop_field_if_empty(
+    col: Any, nt: Any, name: str, info: Optional[dict[str, Any]] = None
+) -> bool:
+    """按名字删一个字段——**只有它是空的才删**，有内容就留着。
+
+    `info` 传进来时会把过程写进去（字段表、是否有内容、删没删掉、失败原因），
+    最后落到 user_files/migration.json，方便事后核对。
+    """
+    type_name = nt.get("name") if isinstance(nt, dict) else "?"
+    info = info if info is not None else {}
+    info.setdefault("type", type_name)
+    info["fields_before"] = [f.get("name") for f in nt.get("flds", []) or []]
+    field = _field_named(nt, name)
+    if field is None:
+        info["reason"] = "no-field"
+        info["fields_after"] = list(info["fields_before"])
+        return False
+    count = _field_nonempty_notes(col, nt, name)
+    info["nonempty_notes"] = count
+    if count is None or count > 0:
+        info["reason"] = "has-content" if count else "unreadable"
+        info["fields_after"] = list(info["fields_before"])
+        print(f"[互动答题卡] 「{name}」字段还有内容，先不删（{type_name}）")
+        return False
+    models = getattr(col, "models", None)
+    remove = getattr(models, "remove_field", None)
+    if not callable(remove):
+        info["reason"] = "no-api"
+        info["fields_after"] = list(info["fields_before"])
+        return False
+    # 第一次：直接删；失败就把「禁止删除」清掉再试一次
+    last_error = ""
+    for attempt in range(2):
+        try:
+            remove(nt, field)
+            info["reason"] = "removed" if attempt == 0 else "removed-after-retry"
+            info["fields_after"] = [f.get("name") for f in nt.get("flds", []) or []]
+            print(f"[互动答题卡] 已从「{type_name}」删掉「{name}」字段")
+            return True
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            print(f"[互动答题卡] 删字段「{name}」第 {attempt + 1} 次失败: {last_error}")
+            if attempt == 0:
+                cleared = _clear_prevent_deletion(models, nt, field)
+                if not cleared:
+                    # 不是「禁止删除」的问题，再试一次也没意义，直接记下来
+                    break
+    info["reason"] = "error"
+    info["error"] = last_error
+    info["fields_after"] = [f.get("name") for f in nt.get("flds", []) or []]
+    return False
+
+
+def migrate_tf_flags() -> int:
+    """把判断题「答案」字段里的 对/错 搬到题目末尾的隐藏标记里（幂等）。"""
+    col = getattr(mw, "col", None)
+    models = getattr(col, "models", None) if col is not None else None
+    if col is None or models is None:
+        return 0
+    nt = models.by_name(TF_NOTE_TYPE_NAME)
+    if nt is None:
+        return 0
+    names = [f["name"] for f in nt.get("flds", [])]
+    if "题目" not in names or "答案" not in names:
+        return 0
+    index_q = names.index("题目")
+    index_a = names.index("答案")
+    moved = 0
+    try:
+        nids = col.find_notes('note:"%s"' % TF_NOTE_TYPE_NAME)
+    except Exception as exc:
+        print(f"[互动答题卡] 取判断题失败: {exc}")
+        return 0
+    for nid in nids:
+        try:
+            note = col.get_note(nid)
+            flag = tf_flag_from_answer(_html_to_text(note.fields[index_a]))
+        except Exception:
+            continue
+        if not flag:
+            continue
+        question = note.fields[index_q]
+        new_question = with_tf_marker(question, flag)
+        touched = False
+        if new_question != question:
+            note.fields[index_q] = new_question
+            touched = True
+        if str(note.fields[index_a]).strip():
+            # 先清空「答案」，这样后面才敢把字段删掉
+            note.fields[index_a] = ""
+            touched = True
+        if touched:
+            try:
+                update_note(col, note)
+            except Exception as exc:
+                print(f"[互动答题卡] 迁移判断题 {nid} 失败: {exc}")
+                continue
+        remember_tf_flag(nid, flag)
+        moved += 1
+    if moved:
+        print(f"[互动答题卡] 已把 {moved} 张判断题的真值移到题目标记里")
+    return moved
+
+
+def heal_tf_markers() -> int:
+    """题目里丢了标记、但小账本里记过真值的判断题，把标记补回去。"""
+    col = getattr(mw, "col", None)
+    models = getattr(col, "models", None) if col is not None else None
+    if col is None or models is None:
+        return 0
+    nt = models.by_name(TF_NOTE_TYPE_NAME)
+    if nt is None:
+        return 0
+    names = [f["name"] for f in nt.get("flds", [])]
+    if "题目" not in names:
+        return 0
+    index_q = names.index("题目")
+    flags = load_tf_flags()
+    if not flags:
+        return 0
+    fixed = 0
+    try:
+        nids = col.find_notes('note:"%s"' % TF_NOTE_TYPE_NAME)
+    except Exception:
+        return 0
+    for nid in nids:
+        flag = flags.get(str(nid))
+        if not flag:
+            continue
+        try:
+            note = col.get_note(nid)
+            question = note.fields[index_q]
+            if tf_marker_flag(question):
+                continue
+            note.fields[index_q] = with_tf_marker(question, flag)
+            update_note(col, note)
+            fixed += 1
+        except Exception:
+            continue
+    if fixed:
+        print(f"[互动答题卡] 补回了 {fixed} 张判断题的真值标记")
+    return fixed
+
+
+def _migration_types_report(col: Any) -> dict[str, Any]:
+    """每个题型的最终字段表 + 「答案」是不是真的没了（给报告用）。"""
+    models = getattr(col, "models", None) if col is not None else None
+    out: dict[str, Any] = {}
+    for name in (CHOICE_NOTE_TYPE_NAME, TF_NOTE_TYPE_NAME, CLOZE_NOTE_TYPE_NAME):
+        nt = models.by_name(name) if models is not None else None
+        if nt is None:
+            out[name] = {"exists": False}
+            continue
+        fields = [f.get("name") for f in nt.get("flds", []) or []]
+        out[name] = {
+            "exists": True,
+            "fields_final": fields,
+            "has_answer": "答案" in fields,
+        }
+    return out
+
+
+def _write_migration_report(report: dict[str, Any]) -> None:
+    try:
+        USER_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        MIGRATION_REPORT_PATH.write_text(
+            json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+    except Exception as exc:
+        print(f"[互动答题卡] 写字段整理报告失败: {exc}")
+
+
+def clean_answer_fields(report: Optional[dict[str, Any]] = None) -> list[str]:
+    """三个题型都不再要「答案」字段：空的就删掉（有内容说明迁移没做完，留着）。"""
+    col = getattr(mw, "col", None)
+    models = getattr(col, "models", None) if col is not None else None
+    if col is None or models is None:
+        return []
+    removed: list[str] = []
+    types_report: dict[str, Any] = report.setdefault("types", {}) if report is not None else {}
+    for name in (CHOICE_NOTE_TYPE_NAME, TF_NOTE_TYPE_NAME, CLOZE_NOTE_TYPE_NAME):
+        nt = models.by_name(name)
+        if nt is None:
+            if report is not None:
+                types_report[name] = {"exists": False}
+            continue
+        info: dict[str, Any] = {}
+        if drop_field_if_empty(col, nt, "答案", info):
+            removed.append(name)
+        if report is not None:
+            types_report[name] = info
+    return removed
+
+
+def migrate_answer_fields() -> None:
+    """1.1.3 起的字段整理：判断题真值搬进题目标记，再把空的「答案」字段删干净。
+
+    过程写进 user_files/migration.json，方便事后核对（沙箱里也能读）。
+    """
+    global _ensure_removed
+    report: dict[str, Any] = {
+        "version": __version__,
+        "ts": int(time.time()),
+        "ensure_removed": list(_ensure_removed),
+    }
+    _ensure_removed = []
+    try:
+        report["tf_migrated"] = migrate_tf_flags()
+    except Exception as exc:
+        report["tf_migrate_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[互动答题卡] 迁移判断题真值失败: {exc}")
+    try:
+        report["tf_healed"] = heal_tf_markers()
+    except Exception as exc:
+        report["tf_heal_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[互动答题卡] 补判断题标记失败: {exc}")
+    try:
+        report["answer_removed_types"] = clean_answer_fields(report)
+    except Exception as exc:
+        report["clean_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[互动答题卡] 清理「答案」字段失败: {exc}")
+    col = getattr(mw, "col", None)
+    final = _migration_types_report(col)
+    for name, entry in final.items():
+        merged = report.setdefault("types", {}).get(name, {})
+        merged.update(entry)
+        report["types"][name] = merged
+    report["answer_fields_left"] = [
+        name for name, entry in report["types"].items() if entry.get("has_answer")
+    ]
+    _write_migration_report(report)
 
 
 _SAMPLE_TAG = "互动答题卡示例"
@@ -490,9 +796,13 @@ def _build_fields(models: Any, names: list[str], base: Any) -> list[Any]:
 
 
 def ensure_cloze_note_type() -> bool:
-    """创建 / 更新「互动答题卡·填空」（原生 cloze 题型），成功返回 True。"""
+    """创建 / 更新「互动答题卡·填空」（原生 cloze 题型，多余的「答案」字段会被清掉）。"""
     return _ensure_note_type(
-        CLOZE_NOTE_TYPE_NAME, CLOZE_FIELD_NAMES, CLOZE_CARD_NAME, cloze=True
+        CLOZE_NOTE_TYPE_NAME,
+        CLOZE_FIELD_NAMES,
+        CLOZE_CARD_NAME,
+        cloze=True,
+        drop_extra_fields=True,
     )
 
 
@@ -507,8 +817,14 @@ def ensure_choice_note_type() -> bool:
 
 
 def ensure_tf_note_type() -> bool:
-    """创建 / 更新「互动答题卡·判断题」。"""
-    return _ensure_note_type(TF_NOTE_TYPE_NAME, TF_FIELD_NAMES, TF_CARD_NAME)
+    """创建 / 更新「互动答题卡·判断题」（题目多留一份隐藏副本；多余的「答案」字段会被清掉）。"""
+    return _ensure_note_type(
+        TF_NOTE_TYPE_NAME,
+        TF_FIELD_NAMES,
+        TF_CARD_NAME,
+        drop_extra_fields=True,
+        question_raw=True,
+    )
 
 
 def ensure_all_note_types() -> dict[str, bool]:
@@ -1605,7 +1921,18 @@ def _editor_config(editor: Any) -> dict[str, Any]:
         "mode": _editor_mode(editor),
         "fields": _editor_field_names(editor),
         "values": _editor_field_values(editor),
+        # 「知识点」面板要按标签逐行配链接：先给一份已保存的标签兜底，
+        # 页面里那份（标签框 DOM）更新，用的时候就先读页面。
+        "tags": _editor_tags(editor),
     }
+
+
+def _editor_tags(editor: Any) -> list[str]:
+    """编辑器里这张笔记当前的标签（刚敲进标签框、还没提交的那几个不在里面）。"""
+    try:
+        return [str(tag) for tag in getattr(editor.note, "tags", []) if str(tag).strip()]
+    except Exception:
+        return []
 
 
 def _editor_field_values(editor: Any) -> list[str]:
@@ -1627,21 +1954,13 @@ def _editor_field_values(editor: Any) -> list[str]:
 _LINK_SCHEME_RE = re.compile(r"^(https?|mailto|file|ftp):", re.I)
 
 
-def parse_knowledge(raw: Any) -> tuple[str, str]:
-    """把「知识点」字段解析成 (按钮文字, 目标)。第一行有效，两种写法：
+def parse_knowledge_line(line: Any) -> tuple[str, str]:
+    """把「知识点」里的一行解析成 (标签, 目标)；空行返回 ("", "")。两种写法：
 
         https://zh.wikipedia.org/wiki/静夜思
         唐诗格律 -> anki:search:tag:唐诗
-
-    目标是网址就交给系统浏览器；否则当成 Anki 搜索式（支持 anki:search: / anki:deck: /
-    anki:tag: / anki:note: 前缀，写成裸的搜索式比如 tag:唐诗 也行）。
     """
-    lines = [line.strip() for line in _html_to_text(raw).splitlines()]
-    first = ""
-    for line in lines:
-        if line:
-            first = line
-            break
+    first = str(line or "").strip()
     if not first:
         return "", ""
     label = first
@@ -1655,9 +1974,27 @@ def parse_knowledge(raw: Any) -> tuple[str, str]:
         label = first[:cut].strip()
         target = first[cut + width :].strip()
     if not target:
-        target = first
         label = first
+        target = first
     return label or target, target
+
+
+def parse_knowledge(raw: Any) -> list[tuple[str, str]]:
+    """把「知识点」字段解析成 [(标签, 目标), ...]：一行一条，每一行都有效。
+
+    标签重复时只留第一条（跟卡片端一致）。目标是网址就交给系统浏览器；否则当成
+    Anki 搜索式（支持 anki:search: / anki:deck: / anki:tag: / anki:note: 前缀，
+    写成裸的搜索式比如 tag:唐诗 也行）。
+    """
+    items: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in _html_to_text(raw).splitlines():
+        label, target = parse_knowledge_line(line)
+        if not target or label in seen:
+            continue
+        seen.add(label)
+        items.append((label, target))
+    return items
 
 
 def knowledge_query(target: str) -> str:
@@ -1761,10 +2098,101 @@ def _note_field_text(note: Any, name: str) -> str:
 _SKIP_TAGS = ("marked", "leech")
 
 
+# --------------------------------------------------------------------------
+# 判断题的真值：题目末尾的隐藏标记（1.1.3 起不再用「答案」字段）
+# --------------------------------------------------------------------------
+
+_TF_TRUE_WORDS = ("对", "正确", "是", "真", "√", "✓", "✔", "t", "true", "yes", "y")
+_TF_FALSE_WORDS = ("错", "错误", "否", "假", "×", "✗", "✘", "f", "false", "no", "n")
+
+
+def tf_flag_from_answer(text: Any) -> str:
+    """把「答案」字段里的写法（对/错/正确/√…）归一成 '对' / '错'，认不出返回 ''。"""
+    t = re.sub(r"[\s\u3002.]+", "", str(text if text is not None else "")).lower()
+    if t in _TF_TRUE_WORDS:
+        return "对"
+    if t in _TF_FALSE_WORDS:
+        return "错"
+    return ""
+
+
+def tf_marker_flag(value: Any) -> str:
+    """从题目内容里取真值标记；没有就返回 ''。"""
+    match = TF_FLAG_RE.search(str(value if value is not None else ""))
+    if not match:
+        return ""
+    flag = match.group(1).strip()
+    return flag if flag in ("对", "错") else ""
+
+
+def with_tf_marker(value: Any, flag: str) -> str:
+    """把题目写成「原文 + 标记」；先把旧标记去掉，所以重复写是幂等的。"""
+    base = TF_FLAG_RE.sub("", str(value if value is not None else ""))
+    if flag not in ("对", "错"):
+        return base
+    return "%s<!--iq-tf:%s-->" % (base, flag)
+
+
+def load_tf_flags() -> dict[str, str]:
+    try:
+        data = json.loads(TF_FLAGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if str(v) in ("对", "错")}
+
+
+def save_tf_flags(flags: dict[str, str]) -> None:
+    try:
+        USER_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        TF_FLAGS_PATH.write_text(
+            json.dumps(flags, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+        )
+    except Exception as exc:
+        print(f"[互动答题卡] 记录判断题真值失败: {exc}")
+
+
+def remember_tf_flag(note_id: Any, flag: str) -> None:
+    """把某张判断题的真值记到插件自己的小账本里（标记万一丢了可以补回来）。"""
+    try:
+        nid = int(note_id)
+    except (TypeError, ValueError):
+        return
+    if nid <= 0 or flag not in ("对", "错"):
+        return
+    flags = load_tf_flags()
+    if flags.get(str(nid)) == flag:
+        return
+    flags[str(nid)] = flag
+    save_tf_flags(flags)
+
+
+def update_note(col: Any, note: Any) -> None:
+    """保存一张改过的笔记（新老接口都试一下）。"""
+    for name in ("update_note", "update_notes"):
+        fn = getattr(col, name, None)
+        if callable(fn):
+            try:
+                fn(note)
+                return
+            except Exception:
+                continue
+    flush = getattr(note, "flush", None)
+    if callable(flush):
+        flush()
+
+
+def tip_key(text: str) -> str:
+    """技巧的判重键：去掉所有空白（空格、换行、全角空格、&nbsp;）之后的文字。"""
+    return re.sub(r"\s+", "", text or "")
+
+
 def gather_tips(editor: Any, page_tags: Optional[list[str]] = None) -> dict[str, Any]:
     """找「同标签的其他卡片」里的解题技巧，给编辑器里的按钮用。
 
     page_tags：编辑器页面里刚敲、还没同步回来的标签（用户没失焦前 note.tags 里没有）。
+    文字一样（忽略空白）的技巧只留一条，留的是排在最前面的那张卡的标签信息。
     """
     try:
         note = editor.note
@@ -1807,13 +2235,21 @@ def gather_tips(editor: Any, page_tags: Optional[list[str]] = None) -> dict[str,
         items.append(
             {
                 "nid": nid,
-                "title": (_note_field_text(other, "题目") or "（没有题目）")[:60],
                 "tip": tip[:400],
                 "tags": shared[:4],
             }
         )
     items.sort(key=lambda item: (-len(item["tags"]), -int(item["nid"])))
-    return {"tags": tags, "items": items[:20], "total": len(items)}
+    # 排完序再按文字去重（忽略空格换行），这样留下的是共同标签最多、最新的那条
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = tip_key(item["tip"])
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return {"tags": tags, "items": unique[:20], "total": len(unique)}
 
 
 def _push_tips(editor: Any, payload: dict[str, Any]) -> None:
@@ -1893,8 +2329,24 @@ def _apply_editor_write(editor: Any, index: int, text: str) -> None:
     }
     try:
         editor.web.eval(js)
+        # 顺手把最新字段值推回页面，免得编辑器里的缓存还是旧的
+        _push_editor_values(editor, fields)
     except Exception as exc:
         print(f"[互动答题卡] 写回编辑器字段失败: {exc}")
+
+
+def _push_editor_values(editor: Any, fields: Optional[list[str]] = None) -> None:
+    """把字段值推给编辑器页面（填空状态行、知识点预览、判断题当前的 对/错 都靠它刷新）。"""
+    try:
+        if fields is None:
+            fields = [str(value) for value in editor.note.fields]
+        editor.web.eval(
+            "window.__IQ_EDITOR__ && window.__IQ_EDITOR__.applyNativeValues"
+            " && window.__IQ_EDITOR__.applyNativeValues(%s);"
+            % json.dumps(fields, ensure_ascii=False)
+        )
+    except Exception as exc:
+        print(f"[互动答题卡] 刷新编辑器状态失败: {exc}")
 
 
 def _write_editor_field(editor: Any, index: int, text: str) -> None:
@@ -1950,6 +2402,17 @@ def _handle_editor_message(parts: list[str], editor: Any) -> Any:
             except Exception as exc:
                 print(f"[互动答题卡] 试打开发挥失败: {exc}")
         return None
+    if action == "tf":
+        # 判断题的勾选框：把 对/错 写成题目末尾的隐藏标记
+        if len(parts) > 3 and parts[3]:
+            from urllib.parse import unquote
+
+            try:
+                flag = unquote(parts[3])
+            except Exception:
+                flag = parts[3]
+            _set_tf_flag_in_editor(editor, flag)
+        return None
     if action != "set" or len(parts) < 4:
         return None
     try:
@@ -1964,6 +2427,34 @@ def _handle_editor_message(parts: list[str], editor: Any) -> Any:
         text = parts[4]
     _write_editor_field(editor, index, text)
     return None
+
+
+def _set_tf_flag_in_editor(editor: Any, flag: str) -> None:
+    """把判断题的真值写成题目末尾的隐藏标记（先 saveNow 取回真实题目，再写回去）。"""
+    if flag not in ("对", "错"):
+        return
+
+    def after_save() -> None:
+        try:
+            note = editor.note
+            names = [f["name"] for f in note.model()["flds"]]
+            fields = [str(value) for value in note.fields]
+            index = names.index("题目")
+        except Exception as exc:
+            print(f"[互动答题卡] 取判断题题目失败: {exc}")
+            return
+        fields[index] = with_tf_marker(fields[index], flag)
+        _apply_editor_write(editor, index, fields[index])
+        remember_tf_flag(getattr(note, "id", 0), flag)
+
+    save_now = getattr(editor, "saveNow", None)
+    if callable(save_now):
+        try:
+            save_now(after_save)
+            return
+        except Exception as exc:
+            print(f"[互动答题卡] 编辑器 saveNow 失败，仍然写标记: {exc}")
+    after_save()
 
 
 def _refresh_editor_fields(editor: Any) -> None:
@@ -2002,6 +2493,36 @@ def on_editor_did_load_note(editor: Any) -> None:
         editor.web.eval(f"{js}\nwindow.__IQ_EDITOR_INSTALL__({payload});")
     except Exception as exc:
         print(f"[互动答题卡] 编辑器助手注入失败: {exc}")
+    _heal_tf_marker_in_editor(editor)
+
+
+def _heal_tf_marker_in_editor(editor: Any) -> None:
+    """打开判断题时：题目里没有标记、但小账本记过的，先把标记补进去。"""
+    try:
+        if _editor_mode(editor) != "tf":
+            return
+        note = editor.note
+        names = [f["name"] for f in note.model()["flds"]]
+        if "题目" not in names:
+            return
+        index = names.index("题目")
+        question = note.fields[index]
+        if tf_marker_flag(question):
+            return
+        flag = load_tf_flags().get(str(getattr(note, "id", "")))
+        if not flag:
+            return
+        fields = [str(value) for value in note.fields]
+        fields[index] = with_tf_marker(question, flag)
+        note.fields[index] = fields[index]
+        editor.web.eval(
+            "setFields(%s, %s);"
+            % (json.dumps(names, ensure_ascii=False), json.dumps(fields, ensure_ascii=False))
+        )
+        _push_editor_values(editor, fields)
+        print(f"[互动答题卡] 已给判断题 {getattr(note, 'id', '?')} 补回真值标记")
+    except Exception as exc:
+        print(f"[互动答题卡] 补判断题标记失败: {exc}")
 
 
 # --------------------------------------------------------------------------
@@ -2301,6 +2822,8 @@ def on_profile_did_open(profile: Any = None) -> None:
                 ensure()
             except Exception as exc:
                 print(f"[互动答题卡] 创建{label}题型失败: {exc}")
+        # 1.1.3：判断题的真值搬进题目标记，然后把「答案」字段删干净
+        migrate_answer_fields()
         try:
             cleanup_legacy_note_type()
         except Exception as exc:

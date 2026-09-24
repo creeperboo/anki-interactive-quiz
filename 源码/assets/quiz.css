@@ -188,6 +188,19 @@
   font-weight: 600;
 }
 
+/* 判完之后写在空里的答案：你填的划掉，后面跟标准答案 */
+.iq-fill-typed {
+  color: var(--iq-no);
+  text-decoration: line-through;
+  margin-right: 0.05em;
+}
+
+.iq-fill-arrow {
+  color: var(--iq-muted);
+  margin: 0 0.25em;
+  font-weight: 400;
+}
+
 .iq-blank-extra {
   margin-top: 0.7em;
   display: flex;
@@ -346,18 +359,6 @@
   margin-bottom: 0.35em;
 }
 
-.iq-answer-line {
-  margin: 0.2em 0 0.4em 0;
-}
-
-.iq-answer-label {
-  color: var(--iq-muted);
-}
-
-.iq-answer-value {
-  font-weight: 600;
-}
-
 .iq-explain {
   margin-top: 0.7em;
   padding-top: 0.6em;
@@ -387,18 +388,31 @@
   margin-top: 0.7em;
 }
 
+.iq-know-label {
+  font-size: 0.85em;
+  color: var(--iq-muted);
+  margin-bottom: 0.35em;
+}
+
+/* 一个标签一个可点的标签，多了自动换行 */
+.iq-know-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em;
+}
+
 .iq-know-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.35em;
   max-width: 100%;
-  padding: 0.4em 0.8em;
-  border-radius: var(--iq-radius);
+  padding: 0.25em 0.7em;
+  border-radius: 999px;
   border: 1.5px solid var(--iq-accent);
   background: transparent;
   color: var(--iq-accent);
   font: inherit;
-  font-size: 0.95em;
+  font-size: 0.9em;
   text-decoration: none;
   cursor: pointer;
 }
@@ -442,19 +456,6 @@
 
 .iq-card[data-side="back"] .iq-options {
   margin-top: 0.6em;
-}
-
-.iq-answer-row {
-  display: flex;
-  gap: 0.6em;
-  padding: 0.2em 0;
-}
-
-.iq-answer-no {
-  flex: 0 0 auto;
-  min-width: 1.4em;
-  color: var(--iq-muted);
-  text-align: right;
 }
 
 #iq-raw {

@@ -87,7 +87,18 @@ Type the statement, then use the checkbox:
 [✓] 这题是正确的        当前：对
 ```
 
-Ticked = true, unticked = false. (The `答案` field still exists behind the scenes and stores 对 / 错; it is hidden in the editor.)
+Ticked = true, unticked = false — nothing to type by hand.
+
+### About the `答案` field
+
+**Since 1.1.3 none of the three note types has a `答案` field** (an earlier build added one back by
+mistake; it is gone again):
+
+- **choice**: grading only looks at the `*` marks in `选项`.
+- **true-false**: the checkbox writes the truth into a hidden marker at the end of `题目`
+  (`太阳从西边升起。<!--iq-tf:错-->`) — invisible on the card, and it is restored automatically
+  if it ever gets lost.
+- **cloze**: the answers live in `{{c1::…}}` inside the question.
 
 ### Cloze questions
 
@@ -104,26 +115,33 @@ Use Anki's own cloze button or `Ctrl+Shift+C`:
 Under the `解题技巧` field there is a **[⚡ 用同标签卡片的技巧]** button. Tag the card (e.g. `唐诗`),
 click it, and the add-on looks for other cards that share a tag **and** already have a tip:
 
-- exactly one match → filled in directly
-- several matches → pick one from the list (sorted by shared tags / recency)
+- a candidate list pops up (sorted by shared tags / recency) — pick one with **[用这条]**
+- the list shows **only the tip text + the shared tags** (no question text), and
+  **identical tips (whitespace/newlines ignored) appear once**, keeping the top-ranked card
 - no tags on this card yet → it tells you to add one first
 
 Tags you just typed in the tag box count too. Write the tip once per topic and reuse it on every card.
 
-### 知识点: jump to a related page after answering
+### 知识点: click a tag to jump to a related page after answering
 
-The new `知识点` field takes one line. After you answer, the card shows a
-**[📚 相关知识点: …]** button that jumps there:
+The new `知识点` field takes **one line per tag**: `tag -> target`. After you answer, the card shows
+a row of clickable tags (under `📚 相关知识点`) and **each tag jumps to its own target**:
 
 ```
-https://en.wikipedia.org/wiki/Quiet_Night_Thoughts    # a web page
-Tang poetry rules -> anki:search:tag:唐诗              # "label -> target"
+唐诗 -> https://en.wikipedia.org/wiki/Quiet_Night_Thoughts   # click 唐诗 → browser
+格律 -> anki:search:tag:唐诗                                  # click 格律 → browser search
 ```
 
-Web addresses open in your browser; anything else is treated as an **Anki search**
+Every line counts (not just the first); a repeated tag keeps its first line. The old "target only"
+form still works. Web addresses open in your browser; anything else is treated as an **Anki search**
 (`anki:search:…`, `anki:tag:…`, `anki:deck:…`, `anki:note:…`, or a bare `tag:唐诗`)
-and opens in Anki's card browser. The button also appears on the answer side, and on
+and opens in Anki's card browser. The tag row also appears on the answer side, and on
 the phone web links stay clickable.
+
+While authoring you don't have to type the format: under `知识点` there is a
+**[🏷 配置标签链接]** button (collapsed by default). It lists the card's tags, one link box per
+tag, each with **[试打开]** to test the link on the spot; **[🔄 刷新标签]** picks up tags you just
+added to the tag box.
 
 ---
 
@@ -136,7 +154,11 @@ the phone web links stay clickable.
 | correct | you choose **Hard / Good / Easy** |
 | multiple choice, missed one but nothing wrong | optional: **Hard** only (setting `multi_partial_credit`) |
 
-Wrong answers show the correct answer plus the explanation (and the "解题技巧" field) before you continue — so you always see what you got wrong. That behaviour is configurable (`wrong_action`).
+There is no separate "correct answer" line (since 1.1.5). Multiple choice / true-false cards rely on option
+colours — green marks the option you should have picked, red marks the one you got wrong. Fill-in-the-blank
+cards write the standard answer straight into the blank you typed in; when you were wrong, your own answer is
+struck through in front of it (`Nanjing → Beijing`). The explanation (and the "解题技巧" field) still shows
+before you continue, and that behaviour is configurable (`wrong_action`).
 
 Blank answers are graded ignoring case, punctuation, spaces and full/half-width differences.
 
@@ -146,12 +168,13 @@ Blank answers are graded ignoring case, punctuation, spaces and full/half-width 
 
 Cards sync as usual and **you can still self-test on the phone**:
 
-1. Options are tappable, cloze blanks are fillable, and you get instant "✅ correct / ❌ wrong + answer + explanation"
+1. Options are tappable, cloze blanks are fillable, and you get instant "✅ correct / ❌ wrong + explanation" — correctness is shown by the option colours and by the answer written into the blank
 2. Tap **Show Answer** below, then rate with **1 Again / 2 Hard / 3 Good / 4 Easy**
 
 How it knows: the desktop add-on injects `window.__ANKI_QUIZ_CONFIG__` into the card. On mobile / AnkiWeb that never happens, so the card switches to "phone mode" — it stops sending add-on messages, which also removes the old "buttons go grey and the card gets stuck" behaviour.
 
-Authoring on the phone also works: fields are plain text — a leading `*` marks the correct option, and the `答案` field of the true-false note type is visible again there.
+Authoring on the phone also works: fields are plain text — a leading `*` marks the correct option, and for
+true-false cards you can type `<!--iq-tf:对-->` / `<!--iq-tf:错-->` at the end of the question.
 
 ---
 

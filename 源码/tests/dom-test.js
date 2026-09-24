@@ -96,6 +96,11 @@ function makeDOM() {
         out += escapeText(c.nodeValue);
         continue;
       }
+      if (c.nodeType === 8) {
+        /* 注释节点：真实浏览器的 innerHTML 会把它原样吐出来 */
+        out += "<!--" + c.nodeValue + "-->";
+        continue;
+      }
       var tag = c.tagName.toLowerCase();
       if (tag === "br") {
         out += "<br>";
@@ -125,6 +130,11 @@ function makeDOM() {
         continue;
       }
       if (tok.indexOf("<!--") === 0) {
+        /* 注释保留成注释节点（真实 DOM 里 comments 也是节点） */
+        var cm = Comment(tok.slice(4, -3));
+        var cp = stack[stack.length - 1];
+        cm.parentNode = cp;
+        cp.childNodes.push(cm);
         continue;
       }
       var isClose = /^<\s*\//.test(tok);
@@ -169,6 +179,22 @@ function makeDOM() {
   function Text(value) {
     var n = {
       nodeType: 3,
+      nodeValue: value === null || value === undefined ? "" : String(value),
+      parentNode: null
+    };
+    Object.defineProperty(n, "textContent", {
+      get: function () {
+        return n.nodeValue;
+      },
+      set: function (v) {
+        n.nodeValue = String(v === null || v === undefined ? "" : v);
+      }
+    });
+    return n;
+  }
+  function Comment(value) {
+    var n = {
+      nodeType: 8,
       nodeValue: value === null || value === undefined ? "" : String(value),
       parentNode: null
     };
@@ -462,7 +488,6 @@ function cardHTML(f, side) {
   var back = "";
   if (side === "back") {
     back =
-      '<div id="iq-answer-block"><div id="iq-answer-list"></div></div>' +
       '<div id="iq-explanation"></div><div id="iq-tips"></div>' +
       '<div id="iq-knowledge"></div><div id="iq-source"></div>';
   }
@@ -498,6 +523,9 @@ function cardHTML(f, side) {
     "</div>" +
     '<div id="iq-raw-type">' +
     (f.type || "") +
+    "</div>" +
+    '<div id="iq-raw-question">' +
+    (f.questionRaw || "") +
     "</div>" +
     '<div id="iq-raw-knowledge">' +
     (f.knowledge || "") +
@@ -628,6 +656,11 @@ var has = function (arr, s) {
   ok("B1 判为错误", verdict(r).indexOf("回答错误") >= 0, verdict(r));
   ok("B2 正确项高亮", opts.children[0].classList.contains("iq-correct"));
   ok("B3 误选项标红", opts.children[1].classList.contains("iq-wrong"));
+  ok(
+    "B3b 反馈区不再列「正确答案」",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
   ok("B4 发出 wrong", has(r.calls, "iq:wrong"));
   eq("B5 只剩一个继续按钮", r.actions().querySelectorAll("button").length, 1);
   r.fire(byEase(r, 1), "click");
@@ -639,6 +672,12 @@ var has = function (arr, s) {
   var r = run({ question: "Q", options: "*A. 甲<br>B. 乙" });
   r.fire(r.controls().querySelector(".iq-dontknow"), "click");
   ok("C1 提示不知道", verdict(r).indexOf("不知道") >= 0, verdict(r));
+  ok(
+    "C1b 「不知道」也不列「正确答案」",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
+  ok("C1c 正确项仍然高亮", r.opts().children[0].classList.contains("iq-correct"));
   ok("C2 发出 wrong", has(r.calls, "iq:wrong"));
   r.fire(byEase(r, 1), "click");
   eq("C3 继续 -> grade:1", r.calls[r.calls.length - 1], "iq:grade:1");
@@ -665,6 +704,12 @@ var has = function (arr, s) {
   r.fire(r.opts().children[0], "click");
   r.fire(r.controls().querySelector(".iq-submit"), "click");
   ok("D6 漏选判错", verdict(r).indexOf("回答错误") >= 0, verdict(r));
+  ok(
+    "D6b 漏选也不列「正确答案」",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
+  ok("D6c 漏掉的那项标绿", r.opts().children[1].classList.contains("iq-correct"));
 })();
 
 /* D3. 多选多选也算错 */
@@ -693,6 +738,77 @@ var has = function (arr, s) {
   ok("E4 选正确判正确", verdict(r).indexOf("回答正确") >= 0, verdict(r));
 })();
 
+/* E2. 判断题：真值存在题目末尾的隐藏标记里（1.1.3 起，不再有「答案」字段） */
+(function () {
+  var r = run({ question: "地球是方的<!--iq-tf:错-->" });
+  eq("E5 有标记就接管", r.opts().children.length, 2);
+  r.fire(r.opts().children[1], "click");
+  ok("E6 点「错误」判对", verdict(r).indexOf("回答正确") >= 0, verdict(r));
+  ok("E7 答对时不用再报正确答案", verdict(r).indexOf("正确答案") < 0, verdict(r));
+})();
+
+(function () {
+  var r = run({ question: "地球是圆的<!--iq-tf:对-->" });
+  r.fire(r.opts().children[0], "click");
+  ok("E8 点「正确」判对", verdict(r).indexOf("回答正确") >= 0, verdict(r));
+})();
+
+(function () {
+  var r = run({ question: "地球是方的<!--iq-tf:错-->" });
+  r.fire(r.opts().children[0], "click");
+  ok("E9 点错判错", verdict(r).indexOf("回答错误") >= 0, verdict(r));
+  ok(
+    "E9b 答错也不再列「正确答案」",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
+  ok("E9c 该选的那项标绿", r.opts().children[1].classList.contains("iq-correct"));
+  ok("E9d 不该选的那项不标绿", !r.opts().children[0].classList.contains("iq-correct"));
+})();
+
+(function () {
+  /* 标记放在隐藏副本里也认（模板对判断题多留了一份题目） */
+  var r = run({ question: "地球是方的", questionRaw: "地球是方的<!--iq-tf:错-->" });
+  eq("E10 隐藏副本里的标记也认", r.opts().children.length, 2);
+  r.fire(r.opts().children[1], "click");
+  ok("E11 照样判对", verdict(r).indexOf("回答正确") >= 0, verdict(r));
+})();
+
+(function () {
+  /* 标记被人手删掉、又没同步过：当普通卡处理，别乱判 */
+  var r = run({ question: "地球是方的" });
+  eq("E12 没标记就不接管", r.opts().children.length, 0);
+})();
+
+(function () {
+  /* 背面也不列答案文字：改成两个着色的选项（正确的那项标绿） */
+  var r = run({ question: "地球是方的<!--iq-tf:错-->" }, { side: "back" });
+  var opts = r.opts();
+  eq("E13 答案面画出两个选项", opts.children.length, 2);
+  eq("E13b 选项文字", r.texts(opts.querySelectorAll(".iq-opt-text")), ["\u6b63\u786e / \u5bf9", "\u9519\u8bef / \u9519"]);
+  eq("E13c 只有一项标绿", opts.querySelectorAll(".iq-correct").length, 1);
+  ok("E13d 标绿的是「错误」", opts.children[1].classList.contains("iq-correct"));
+  ok("E13e 答案面没有答案文字区", r.doc.getElementById("iq-answer-block") === null);
+  eq("E13f 题目后面不贴真值", r.question().textContent, "地球是方的");
+  eq("E13g 也没有多出来的答案块", r.question().querySelectorAll(".iq-blank-extra").length, 0);
+})();
+
+(function () {
+  var r = run({ question: "地球是圆的<!--iq-tf:对-->" }, { side: "back" });
+  ok("E14 真值「对」时标绿的是「正确」", r.opts().children[0].classList.contains("iq-correct"));
+  eq("E14b 另一项不标绿", r.opts().children[1].classList.contains("iq-correct"), false);
+  eq("E14c 题目也没被贴真值", r.question().textContent, "地球是圆的");
+})();
+
+/* 老卡：真值还在「答案」字段里（没有标记），背面一样画选项、不贴答案文字 */
+(function () {
+  var r = run({ question: "地球是方的", answer: "错" }, { side: "back" });
+  var opts = r.opts();
+  eq("E15 老卡背面也画两个选项", opts.children.length, 2);
+  ok("E15b 标绿的是「错误」", opts.children[1].classList.contains("iq-correct"));
+  eq("E15c 题目后面不贴答案", r.question().textContent, "地球是方的");
+})();
+
 /* F. 填空题（带标记） */
 (function () {
   var r = run({
@@ -710,7 +826,18 @@ var has = function (arr, s) {
   inputs[1].value = "上海";
   r.fire(r.controls().querySelector(".iq-submit"), "click");
   ok("F5 填空判正确", verdict(r).indexOf("回答正确") >= 0, verdict(r));
-  ok("F6 输入框锁只读", inputs[0].readOnly === true);
+  ok("F6 输入框已经换成静态答案", r.question().querySelectorAll(".iq-input").length === 0);
+  eq(
+    "F6b 答对时空里写标准答案",
+    r.texts(r.question().querySelectorAll(".iq-blank-filled")),
+    ["北京", "上海"]
+  );
+  eq("F6c 答对时不划掉我填的", r.question().querySelectorAll(".iq-fill-typed").length, 0);
+  ok(
+    "F6d 反馈区不再列「正确答案」",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
   r.fire(byEase(r, 2), "click");
   eq("F7 困难 -> grade:2", r.calls[r.calls.length - 1], "iq:grade:2");
 })();
@@ -723,8 +850,14 @@ var has = function (arr, s) {
   inputs[0].value = "南京";
   r.fire(r.controls().querySelector(".iq-submit"), "click");
   ok("F9 填空判错", verdict(r).indexOf("回答错误") >= 0, verdict(r));
-  ok("F10 错的输入框标红", inputs[0].classList.contains("iq-input-no"));
-  ok("F11 正确答案出现在反馈里", r.feedback().textContent.indexOf("北京") >= 0);
+  eq("F10 空里划掉我填的", r.texts(r.question().querySelectorAll(".iq-fill-typed")), ["南京"]);
+  eq("F10b 空里跟标准答案", r.texts(r.question().querySelectorAll(".iq-blank-filled")), ["北京"]);
+  eq("F10c 中间有箭头", r.texts(r.question().querySelectorAll(".iq-fill-arrow")), ["\u2192"]);
+  ok(
+    "F11 反馈区不再列「正确答案」",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
 })();
 
 /* G. 填空题（无标记） */
@@ -736,6 +869,33 @@ var has = function (arr, s) {
   inp.value = "北京";
   r.fire(inp, "keydown", { key: "Enter", keyCode: 13 });
   ok("G3 回车提交判正确", verdict(r).indexOf("回答正确") >= 0, verdict(r));
+  eq("G4 答对时空里写标准答案", r.texts(r.question().querySelectorAll(".iq-blank-filled")), ["北京"]);
+})();
+
+/* G2. 填空点「不知道」：只给标准答案，没有划掉的痕迹 */
+(function () {
+  var r = run({ question: "首都是___。", answer: "北京" });
+  r.fire(r.controls().querySelector(".iq-dontknow"), "click");
+  ok("G5 「不知道」判错", verdict(r).indexOf("不知道") >= 0, verdict(r));
+  eq("G6 空里写标准答案", r.texts(r.question().querySelectorAll(".iq-blank-filled")), ["北京"]);
+  eq("G7 没填就不划", r.question().querySelectorAll(".iq-fill-typed").length, 0);
+  eq("G8 没填就没有箭头", r.question().querySelectorAll(".iq-fill-arrow").length, 0);
+  ok(
+    "G9 反馈区没有答案文字",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
+})();
+
+/* G3. 空位本来就没录答案：保持输入框着色，不做揭晓 */
+(function () {
+  var r = run({ question: "首都是___。" });
+  var inp = r.question().querySelectorAll(".iq-input")[0];
+  inp.value = "南京";
+  r.fire(r.controls().querySelector(".iq-submit"), "click");
+  ok("G10 没录答案时填了就算对", verdict(r).indexOf("回答正确") >= 0, verdict(r));
+  ok("G11 输入框留着并标绿", inp.classList.contains("iq-input-ok"));
+  eq("G12 不会凭空写答案", r.question().querySelectorAll(".iq-blank-filled").length, 0);
 })();
 
 /* H. 用字母指定答案 */
@@ -994,7 +1154,12 @@ function resultCall(r) {
   r.fire(r.opts().children[1], "click");
   ok("T8 手机模式答错也判错", verdict(r).indexOf("\u56de\u7b54\u9519\u8bef") >= 0, verdict(r));
   ok("T9 答错的标题不再承诺「记为重来」", verdict(r).indexOf("\u8bb0\u4e3a\u300c\u91cd\u6765\u300d") < 0, verdict(r));
-  eq("T10 显示正确答案", r.feedback().querySelectorAll(".iq-answer-value").length, 1);
+  ok(
+    "T10 手机模式反馈区也不列「正确答案」",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
+  ok("T10b 正确项照样标绿", r.opts().children[0].classList.contains("iq-correct"));
   eq("T11 仍然是自己评级的提示", r.actions().querySelectorAll(".iq-manual").length, 1);
   eq("T12 没有发 iq:wrong", has(r.calls, "iq:wrong"), false);
 })();
@@ -1002,7 +1167,8 @@ function resultCall(r) {
 (function () {
   var r = run({ question: "Q", options: "*A. \u7532<br>B. \u4e59" }, { noHost: true });
   r.fire(r.controls().querySelector(".iq-dontknow"), "click");
-  ok("T13 手机上「不知道」也能看到答案", verdict(r).indexOf("\u4e0d\u77e5\u9053") >= 0, verdict(r));
+  ok("T13 手机上「不知道」照样判为不知道", verdict(r).indexOf("\u4e0d\u77e5\u9053") >= 0, verdict(r));
+  ok("T13b 也不列答案文字", r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0, r.feedback().textContent);
   eq("T14 仍然是自己评级", r.actions().querySelectorAll(".iq-manual").length, 1);
 })();
 
@@ -1013,6 +1179,8 @@ function resultCall(r) {
   r.fire(r.controls().querySelector(".iq-submit"), "click");
   ok("T15 手机模式填空也能本地判分", verdict(r).indexOf("\u56de\u7b54\u9519\u8bef") >= 0, verdict(r));
   eq("T16 填空也是自己评级", r.actions().querySelectorAll(".iq-manual").length, 1);
+  eq("T16b 手机上空里也写标准答案", r.texts(r.question().querySelectorAll(".iq-blank-filled")), ["\u5317\u4eac"]);
+  eq("T16c 手机上也划掉我填的", r.texts(r.question().querySelectorAll(".iq-fill-typed")), ["\u4e0a\u6d77"]);
 })();
 
 (function () {
@@ -1060,6 +1228,11 @@ function clozeQuestion() {
   ok("S5 填对判为正确", verdict(r).indexOf("\u56de\u7b54\u6b63\u786e") >= 0, verdict(r));
   ok("S6 上报 fill", resultCall(r).indexOf("iq:result:fill:1:") === 0, resultCall(r));
   eq("S7 给出困难/良好/简单", r.texts(r.actions().querySelectorAll(".iq-grade-main")), ["困难", "良好", "简单"]);
+  eq(
+    "S7b 答对时空里写标准答案",
+    r.texts(r.question().querySelectorAll(".iq-blank-filled")),
+    ["\u674e\u767d", "\u674e\u767d"]
+  );
 })();
 
 (function () {
@@ -1070,7 +1243,17 @@ function clozeQuestion() {
   r.fire(r.controls().querySelector(".iq-submit"), "click");
   ok("S8 填错判为错误", verdict(r).indexOf("\u56de\u7b54\u9519\u8bef") >= 0, verdict(r));
   ok("S9 填错会发 iq:wrong", has(r.calls, "iq:wrong"));
-  eq("S10 正确答案显示出来", r.texts(r.feedback().querySelectorAll(".iq-answer-value")), ["李白"]);
+  eq("S10 空里划掉我填的", r.texts(r.question().querySelectorAll(".iq-fill-typed")), ["\u675c\u7526"]);
+  eq(
+    "S10b 两个空都写标准答案",
+    r.texts(r.question().querySelectorAll(".iq-blank-filled")),
+    ["\u674e\u767d", "\u674e\u767d"]
+  );
+  ok(
+    "S10c 反馈区不列答案文字",
+    r.feedback().textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.feedback().textContent
+  );
 })();
 
 (function () {
@@ -1102,7 +1285,7 @@ function clozeQuestion() {
   eq("S14 背面保留答案文本", r.question().textContent.indexOf("\u674e\u767d") >= 0, true);
 })();
 
-/* V. 相关知识点（制卡时设的链接，答完题后跳过去） */
+/* V. 相关知识点（制卡时给标签配的链接，答完题后点标签跳过去） */
 function answerFirst(r) {
   r.fire(r.opts().children[0], "click");
   var submit = r.controls().querySelector(".iq-submit");
@@ -1115,30 +1298,37 @@ function answerFirst(r) {
   var r = run({
     question: "Q",
     options: "*A. \u7532<br>B. \u4e59",
-    knowledge: "\u9759\u591c\u601d\u5168\u6587 -> https://a.example/x"
+    knowledge: "\u5510\u8bd7 -> https://a.example/tang"
   });
   answerFirst(r);
   var btn = r.feedback().querySelector(".iq-know-btn");
   ok("V1 答完题后出现知识点入口", !!btn);
-  eq("V2 按钮文字用制卡时写的标题", btn.textContent.indexOf("\u9759\u591c\u601d\u5168\u6587") >= 0, true);
-  eq("V3 网址链接带上了 href", btn.getAttribute("href"), "https://a.example/x");
+  eq("V2 按钮文字就是标签", btn.textContent.indexOf("\u5510\u8bd7") >= 0, true);
+  eq("V3 网址链接带上了 href", btn.getAttribute("href"), "https://a.example/tang");
   r.fire(btn, "click");
-  eq("V4 点它会通知插件打开", r.calls[r.calls.length - 1], "iq:open:" + encodeURIComponent("https://a.example/x"));
+  eq(
+    "V4 点它会通知插件打开",
+    r.calls[r.calls.length - 1],
+    "iq:open:" + encodeURIComponent("https://a.example/tang")
+  );
+  ok("V4a 上面有「相关知识点」的标题", !!r.feedback().querySelector(".iq-know-label"));
 })();
 
 (function () {
+  /* 一行一个标签：点哪个跳哪个 */
   var r = run({
     question: "Q",
     options: "*A. \u7532<br>B. \u4e59",
-    knowledge: "anki:search:tag:\u5510\u8bd7"
+    knowledge: "\u5510\u8bd7 -> https://a.example/tang\n\u5b8b\u8bcd -> tag:\u5b8b\u8bcd"
   });
   answerFirst(r);
-  var btn = r.feedback().querySelector(".iq-know-btn");
-  ok("V5 搜索式也出现入口", !!btn);
-  eq("V6 桌面端不当链接", btn.getAttribute("href"), null);
-  eq("V7 只有目标时按钮文字就是目标", btn.textContent.indexOf("tag:\u5510\u8bd7") >= 0, true);
-  r.fire(btn, "click");
-  eq("V8 点它交给插件搜索", r.calls[r.calls.length - 1], "iq:open:" + encodeURIComponent("anki:search:tag:\u5510\u8bd7"));
+  var chips = r.feedback().querySelectorAll(".iq-know-btn");
+  eq("V5 两个标签就是两个可点标签", chips.length, 2);
+  eq("V6 第一个是网址链接", chips[0].getAttribute("href"), "https://a.example/tang");
+  eq("V7 第二个不是链接（走 Anki 搜索）", chips[1].getAttribute("href"), null);
+  eq("V7a 第二个标签文字", chips[1].textContent.indexOf("\u5b8b\u8bcd") >= 0, true);
+  r.fire(chips[1], "click");
+  eq("V8 点第二个标签搜的是它自己", r.calls[r.calls.length - 1], "iq:open:" + encodeURIComponent("tag:\u5b8b\u8bcd"));
   var hint = r.feedback().querySelector(".iq-know-hint");
   ok("V9 桌面端不显示「在 Anki 里搜」的提示", !!hint && hint.getAttribute("hidden") !== null);
 })();
@@ -1146,33 +1336,35 @@ function answerFirst(r) {
 (function () {
   /* 手机（没有插件）：网址直接当链接点，搜索式给一行提示 */
   var r = run(
-    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "https://a.example/x" },
+    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "\u5510\u8bd7 -> https://a.example/x" },
     { noHost: true }
   );
   answerFirst(r);
   var btn = r.feedback().querySelector(".iq-know-btn");
-  ok("V10 手机上也显示入口", !!btn);
+  ok("V10 手机上也显示标签", !!btn);
+  ok("V10a 手机上就是普通链接", btn.getAttribute("href") === "https://a.example/x");
   r.fire(btn, "click");
   eq("V11 手机上不发给插件", r.calls.length, 0);
 
   var r2 = run(
-    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "tag:\u5510\u8bd7" },
+    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "\u5b8b\u8bcd -> tag:\u5b8b\u8bcd" },
     { noHost: true }
   );
   answerFirst(r2);
   var hint = r2.feedback().querySelector(".iq-know-hint");
   ok("V12 手机上搜索式给提示", !!hint && hint.getAttribute("hidden") === null, hint && hint.textContent);
+  ok("V12a 提示里写着搜什么", !!hint && hint.textContent.indexOf("tag:\u5b8b\u8bcd") >= 0, hint && hint.textContent);
 })();
 
 (function () {
   /* 答案面也有，手机上翻面就能用 */
   var r = run(
-    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "\u9759\u591c\u601d -> https://a.example/x" },
+    { question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "\u5510\u8bd7 -> https://a.example/x" },
     { side: "back" }
   );
   var btn = r.knowledge().querySelector(".iq-know-btn");
   ok("V13 答案面上也有知识点", !!btn);
-  eq("V14 答案面上的标题对", btn.textContent.indexOf("\u9759\u591c\u601d") >= 0, true);
+  eq("V14 答案面上的标签对", btn.textContent.indexOf("\u5510\u8bd7") >= 0, true);
 })();
 
 (function () {
@@ -1181,6 +1373,58 @@ function answerFirst(r) {
   eq("V15 没填知识点就不出现入口", r.feedback().querySelectorAll(".iq-know-btn").length, 0);
   var rb = run({ question: "Q", options: "*A. \u7532<br>B. \u4e59" }, { side: "back" });
   eq("V16 答案面同理", rb.knowledge().querySelectorAll(".iq-know-btn").length, 0);
+})();
+
+(function () {
+  /* 老写法（只写链接、没有标签）照样显示，标签就是链接本身 */
+  var r = run({ question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "https://a.example/old" });
+  answerFirst(r);
+  var btn = r.feedback().querySelector(".iq-know-btn");
+  ok("V17 老的单行链接照旧显示", !!btn);
+  eq("V18 没有标签时标签就是链接本身", btn.textContent.indexOf("https://a.example/old") >= 0, true);
+})();
+
+(function () {
+  var r = run({
+    question: "Q",
+    options: "*A. \u7532<br>B. \u4e59",
+    knowledge: "\u5510\u8bd7 -> https://a.example/1\n\u5510\u8bd7 -> https://a.example/2"
+  });
+  answerFirst(r);
+  var chips = r.feedback().querySelectorAll(".iq-know-btn");
+  eq("V19 同名标签只留第一条", chips.length, 1);
+  eq("V20 留的是第一条的链接", chips[0].getAttribute("href"), "https://a.example/1");
+})();
+
+/* W. 答案面不再列答案文字（1.1.5：靠颜色和空里的答案说话） */
+(function () {
+  var r = run({ question: "Q", options: "*A. 甲<br>B. 乙" }, { side: "back" });
+  var opts = r.opts();
+  eq("W1 选择题背面照样画选项", opts.children.length, 2);
+  eq("W2 只有正确项标绿", opts.querySelectorAll(".iq-correct").length, 1);
+  ok("W3 没有答案文字区", r.doc.getElementById("iq-answer-block") === null);
+  ok(
+    "W4 整页没有「正确答案」四个字",
+    r.doc.body.textContent.indexOf("\u6b63\u786e\u7b54\u6848") < 0,
+    r.doc.body.textContent
+  );
+})();
+
+(function () {
+  var r = run({ question: "首都是___。", answer: "北京" }, { side: "back" });
+  eq("W5 填空背面把答案写进空里", r.texts(r.question().querySelectorAll(".iq-blank-filled")), ["北京"]);
+  eq("W6 填空背面没有输入框", r.question().querySelectorAll(".iq-input").length, 0);
+  eq("W7 没有答案文字区", r.doc.getElementById("iq-answer-block"), null);
+})();
+
+(function () {
+  /* 空位不够时，多出来的答案还是附在题目后面 */
+  var r = run({ question: "____ 和 ____", answer: "甲<br>乙<br>丙" }, { side: "back" });
+  eq(
+    "W8 多出来的答案贴在题目后",
+    r.texts(r.question().querySelectorAll(".iq-blank-extra .iq-blank")),
+    ["丙"]
+  );
 })();
 
 log.join("\n") + "\n----\nPASS=" + pass + " FAIL=" + fail;

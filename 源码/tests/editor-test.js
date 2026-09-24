@@ -6,8 +6,8 @@
    DOM 里那个 textarea 只是备份路径（没有宿主时才用）。 */
 
 /* 真实题型里「知识点」排在最后（新字段只能往后追加） */
-var CHOICE_FIELDS = ["题目", "选项", "答案", "解析", "解题技巧", "来源", "知识点"];
-var TF_FIELDS = ["题目", "答案", "解析", "解题技巧", "来源", "知识点"];
+var CHOICE_FIELDS = ["题目", "选项", "解析", "解题技巧", "来源", "知识点"];
+var TF_FIELDS = ["题目", "解析", "解题技巧", "来源", "知识点"];
 var CLOZE_FIELDS = ["题目", "解析", "解题技巧", "来源", "知识点"];
 
 /* 假的 pycmd：把插件会收到的消息记下来 */
@@ -40,14 +40,22 @@ function makeEditor(values, fields) {
     fields: fields,
     areas: areas,
     fire: dom.fire,
-    install: function (mode, typeName) {
+    install: function (mode, typeName, extra) {
       iqSent.length = 0;
-      win.__IQ_EDITOR_INSTALL__({
+      var payload = {
         mode: mode,
         fields: fields,
         type: typeName || "",
         values: values
-      });
+      };
+      if (extra) {
+        for (var key in extra) {
+          if (Object.prototype.hasOwnProperty.call(extra, key)) {
+            payload[key] = extra[key];
+          }
+        }
+      }
+      win.__IQ_EDITOR_INSTALL__(payload);
       return this;
     },
     sent: function () {
@@ -213,28 +221,43 @@ function key(e, node, spec) {
   var e = makeEditor(["\u592a\u9633\u4ece\u897f\u8fb9\u5347\u8d77\u3002", "", "", "", ""], TF_FIELDS);
   e.install("tf");
   ok("F30 生成了勾选框", !!e.host());
-  eq("F31 藏起了答案文本框", e.answerField().style.display, "none");
+  var qStyle = e.questionField().style;
+  ok("F31 题目没有被藏起来（真值改存在题目标记里）", !qStyle || qStyle.display !== "none");
+  ok("F31b 题型里已经没有「答案」字段", e.fields.indexOf("\u7b54\u6848") < 0);
   eq("F32 初始不勾选", e.boxes()[0].checked, false);
   ok("F33 提示没设置", e.host().textContent.indexOf("\u8fd8\u6ca1\u8bbe\u7f6e") >= 0, e.host().textContent);
 
   e.boxes()[0].checked = true;
   e.fire(e.boxes()[0], "change");
-  eq("F34 勾上 = 对", e.stored("\u7b54\u6848"), "\u5bf9");
+  eq(
+    "F34 勾上 = 对（写成题目标记）",
+    e.sent()[0],
+    "iq:editor:tf:" + encodeURIComponent("\u5bf9")
+  );
   ok("F35 显示当前是对的", e.host().textContent.indexOf("\u5f53\u524d\uff1a\u5bf9") >= 0, e.host().textContent);
 
   e.boxes()[0].checked = false;
   e.fire(e.boxes()[0], "change");
-  eq("F36 不勾 = 错", e.stored("\u7b54\u6848"), "\u9519");
+  eq(
+    "F36 不勾 = 错",
+    e.sent()[1],
+    "iq:editor:tf:" + encodeURIComponent("\u9519")
+  );
   ok("F37 显示当前是错的", e.host().textContent.indexOf("\u5f53\u524d\uff1a\u9519") >= 0, e.host().textContent);
 })();
 
 (function () {
-  var e = makeEditor(["Q", "\u9519", "", "", ""], TF_FIELDS);
+  var e = makeEditor(["Q", "", "", "", ""], TF_FIELDS);
   e.install("tf");
-  eq("F38 打开时按已有答案勾选", e.boxes()[0].checked, false);
-  var e2 = makeEditor(["Q", "\u5bf9", "", "", ""], TF_FIELDS);
+  eq("F38 题目里没有标记时不勾选", e.boxes()[0].checked, false);
+  var e2 = makeEditor(["Q<!--iq-tf:\u5bf9-->", "", "", "", ""], TF_FIELDS);
   e2.install("tf");
-  eq("F39 「对」时是勾上的", e2.boxes()[0].checked, true);
+  eq("F39 题目标记是「对」时勾上", e2.boxes()[0].checked, true);
+  ok("F39b 旁边写着当前是对", e2.host().textContent.indexOf("\u5f53\u524d\uff1a\u5bf9") >= 0, e2.host().textContent);
+  var e3 = makeEditor(["\u9898\u5e72<!--iq-tf:\u9519-->", "", "", "", ""], TF_FIELDS);
+  e3.install("tf");
+  eq("F39c 标记是「错」时不勾", e3.boxes()[0].checked, false);
+  ok("F39d 旁边写着当前是错", e3.host().textContent.indexOf("\u5f53\u524d\uff1a\u9519") >= 0, e3.host().textContent);
 })();
 
 /* ---------- 填空题：状态行 ---------- */
@@ -266,9 +289,9 @@ function key(e, node, spec) {
 })();
 
 (function () {
-  var e = makeEditor(["Q", "", "", "", ""], TF_FIELDS);
-  e.install("tf");
-  eq("F50 整个「答案」字段块都藏起来", e.answerField().parentNode.style.display, "none");
+  var e = makeEditor(["Q", "", "", "", "", ""]);
+  e.install("choice");
+  eq("F50 「选项」字段名也一起藏住了（整块）", e.optionField().parentNode.style.display, "none");
 })();
 
 /* ---------- 读写接口 ---------- */
@@ -330,8 +353,8 @@ function key(e, node, spec) {
   e.install("tf");
   e.boxes()[0].checked = true;
   e.fire(e.boxes()[0], "change");
-  eq("G9 判断勾选写「对」", e.stored("\u7b54\u6848"), "\u5bf9");
-  eq("G10 判断字段序号对", e.sent()[0].split(":")[3], "1");
+  eq("G9 判断勾选发的是判断题消息", e.sent()[0].split(":")[2], "tf");
+  eq("G10 消息里带「对」", decodeURIComponent(e.sent()[0].split(":")[3]), "\u5bf9");
 })();
 
 (function () {
@@ -390,11 +413,19 @@ function key(e, node, spec) {
   var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
   e.install("choice");
   ok(
-    "H4 只有一条时直接填进技巧",
+    "H4 只有一条也弹候选面板",
     e.api.showTips({ tags: ["\u5510\u8bd7"], items: [{ nid: 1, title: "\u9898\u4e00", tip: "\u5148\u60f3\u671d\u4ee3", tags: ["\u5510\u8bd7"] }] }) === true
   );
-  eq("H5 技巧写回了字段", e.stored("\u89e3\u9898\u6280\u5de7"), "\u5148\u60f3\u671d\u4ee3");
-  ok("H6 提示里说了来源", e.dom.document.getElementById("iq-ed-tipsbar").textContent.indexOf("\u9898\u4e00") >= 0);
+  var panel = e.dom.document.getElementById("iq-ed-tipspanel");
+  ok("H5 一条时候选面板也在", !!panel && panel.querySelectorAll(".iq-ed-panel-row").length === 1);
+  eq("H6 还没点「用这条」就没写字段", e.stored("\u89e3\u9898\u6280\u5de7"), null);
+  e.fire(panel.querySelector(".iq-ed-mini"), "click");
+  eq("H6a 点了才写进技巧字段", e.stored("\u89e3\u9898\u6280\u5de7"), "\u5148\u60f3\u671d\u4ee3");
+  ok(
+    "H6b 填完的提示里不再带题目",
+    e.dom.document.getElementById("iq-ed-tipsbar").textContent.indexOf("\u9898\u4e00") < 0,
+    e.dom.document.getElementById("iq-ed-tipsbar").textContent
+  );
 })();
 
 (function () {
@@ -404,14 +435,20 @@ function key(e, node, spec) {
     tags: ["\u5510\u8bd7"],
     total: 2,
     items: [
-      { nid: 2, title: "\u9898\u4e8c", tip: "\u6280\u5de7\u4e8c", tags: ["\u5510\u8bd7", "\u5b8b\u8bcd"] },
-      { nid: 1, title: "\u9898\u4e00", tip: "\u6280\u5de7\u4e00", tags: ["\u5510\u8bd7"] }
+      { nid: 2, tip: "\u6280\u5de7\u4e8c", tags: ["\u5510\u8bd7", "\u5b8b\u8bcd"] },
+      { nid: 1, tip: "\u6280\u5de7\u4e00", tags: ["\u5510\u8bd7"] }
     ]
   });
   var panel = e.dom.document.getElementById("iq-ed-tipspanel");
   ok("H7 多条时候选面板出来了", !!panel);
   eq("H8 面板里两行", panel.querySelectorAll(".iq-ed-panel-row").length, 2);
   ok("H9 行里带标签", panel.textContent.indexOf("\u5510\u8bd7") >= 0);
+  eq(
+    "H9a 行里只显示技巧正文",
+    panel.querySelectorAll(".iq-ed-panel-text")[0].textContent,
+    "\u6280\u5de7\u4e8c"
+  );
+  ok("H9b 行里不再显示题目", !panel.querySelector(".iq-ed-panel-title"), panel.textContent);
   e.fire(panel.querySelectorAll(".iq-ed-mini")[1], "click");
   eq("H10 点「用这条」填的是那一条", e.stored("\u89e3\u9898\u6280\u5de7"), "\u6280\u5de7\u4e00");
   eq("H11 用完面板收起", e.dom.document.getElementById("iq-ed-tipspanel"), null);
@@ -442,48 +479,188 @@ function key(e, node, spec) {
   ok("H15 填空题也有技巧按钮", !!c.dom.document.getElementById("iq-ed-tipsbar"));
 })();
 
-/* ---------- 知识点：预览 + 试打开（新增） ---------- */
+/* ---------- 知识点：标签逐行配链接（1.1.6） ---------- */
+
+/* 往「标签框」里塞一个标签（模拟 Anki 编辑器里的标签 chip） */
+function addTag(dom, name) {
+  var box = dom.document.querySelector(".tag-editor");
+  if (!box) {
+    box = dom.document.createElement("div");
+    box.setAttribute("class", "tag-editor");
+    dom.document.body.appendChild(box);
+  }
+  var chip = dom.document.createElement("span");
+  chip.setAttribute("class", "tag");
+  chip.textContent = name;
+  box.appendChild(chip);
+  return chip;
+}
+
 (function () {
   var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
   e.install("choice");
   var bar = e.dom.document.getElementById("iq-ed-knowbar");
-  ok("H16 知识点下面有预览条", !!bar);
-  ok("H17 空着时提示怎么填", bar.textContent.indexOf("\u8fd8\u6ca1\u586b") >= 0, bar.textContent);
-  var btn = e.dom.document.getElementById("iq-ed-knowtest");
-  ok("H18 空着时试打开按钮禁用", !!btn && btn.getAttribute("disabled") !== null);
+  ok("H16 知识点下面有配置按钮", !!bar && !!e.dom.document.getElementById("iq-ed-knowtoggle"));
+  eq("H17 默认收起（不排出一堆行）", e.dom.document.getElementById("iq-ed-knowpanel"), null);
+  ok("H18 空着时提示怎么填", bar.textContent.indexOf("\u8fd8\u6ca1\u914d") >= 0, bar.textContent);
 })();
 
 (function () {
   var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
-  e.install("choice");
-  e.api.applyNativeValues(["Q", "*\u7532", "", "", "", "", "\u5510\u8bd7\u683c\u5f8b -> anki:search:tag:\u5510\u8bd7"]);
-  var hint = e.dom.document.getElementById("iq-ed-knowhint");
-  ok("H19 预览出按钮文字", hint.textContent.indexOf("\u5510\u8bd7\u683c\u5f8b") >= 0, hint.textContent);
-  ok("H20 预览出这是 Anki 搜索", hint.textContent.indexOf("Anki") >= 0, hint.textContent);
-  var btn = e.dom.document.getElementById("iq-ed-knowtest");
-  ok("H21 有内容后按钮可用", btn.getAttribute("disabled") === null);
-  e.fire(btn, "click");
+  addTag(e.dom, "\u5510\u8bd7");
+  e.install("choice", "", { tags: ["\u5510\u8bd7", "\u5b8b\u8bcd"] });
+  e.fire(e.dom.document.getElementById("iq-ed-knowtoggle"), "click");
+  var panel = e.dom.document.getElementById("iq-ed-knowpanel");
+  ok("H19 点按钮才弹出面板", !!panel);
+  eq("H20 每个标签一行", panel.querySelectorAll(".iq-ed-knowrow").length, 2);
   eq(
-    "H22 试打开把目标发给插件",
-    e.sent(),
-    ["iq:editor:open:" + encodeURIComponent("anki:search:tag:\u5510\u8bd7")]
+    "H21 行名就是标签（标签框里的排前面）",
+    panel.querySelectorAll(".iq-ed-knowrow-name")[0].textContent,
+    "\u5510\u8bd7"
+  );
+  eq("H22 还没配过链接时输入框是空的", panel.querySelectorAll(".iq-ed-knowrow-input")[0].value, "");
+  ok("H23 面板里有「刷新标签」", panel.textContent.indexOf("\u5237\u65b0\u6807\u7b7e") >= 0);
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
+  addTag(e.dom, "\u5510\u8bd7");
+  e.install("choice", "", { tags: ["\u5510\u8bd7", "\u5b8b\u8bcd"] });
+  e.fire(e.dom.document.getElementById("iq-ed-knowtoggle"), "click");
+  var panel = e.dom.document.getElementById("iq-ed-knowpanel");
+  var inputs = panel.querySelectorAll(".iq-ed-knowrow-input");
+  inputs[0].value = "https://a.example/tang";
+  e.fire(inputs[0], "blur");
+  eq(
+    "H24 填完写回「知识点」字段",
+    e.stored("\u77e5\u8bc6\u70b9"),
+    "\u5510\u8bd7 -> https://a.example/tang"
+  );
+  var hint = e.dom.document.getElementById("iq-ed-knowhint");
+  ok("H25 预览行跟着更新", hint.textContent.indexOf("\u5510\u8bd7") >= 0, hint.textContent);
+
+  inputs[1].value = "anki:search:tag:\u5b8b\u8bcd";
+  e.fire(inputs[1], "blur");
+  eq(
+    "H26 两行都写进去（一行一条）",
+    e.stored("\u77e5\u8bc6\u70b9"),
+    "\u5510\u8bd7 -> https://a.example/tang\n\u5b8b\u8bcd -> anki:search:tag:\u5b8b\u8bcd"
+  );
+
+  e.fire(panel.querySelectorAll(".iq-ed-mini")[0], "click");
+  eq(
+    "H27 每行的「试打开」发的是自己那条链接",
+    e.sent()[e.sent().length - 1],
+    "iq:editor:open:" + encodeURIComponent("https://a.example/tang")
+  );
+
+  e.fire(panel.querySelectorAll(".iq-ed-mini")[1], "click");
+  eq("H28 点「×」把这行去掉", panel.querySelectorAll(".iq-ed-knowrow").length, 1);
+  eq(
+    "H29 字段里也跟着少一行",
+    e.stored("\u77e5\u8bc6\u70b9"),
+    "\u5b8b\u8bcd -> anki:search:tag:\u5b8b\u8bcd"
   );
 })();
 
 (function () {
-  var e = makeEditor(["Q", "*\u7532", "", "", "", "", ""]);
-  e.install("choice");
-  e.api.applyNativeValues(["Q", "*\u7532", "", "", "", "", "<div>\u9759\u591c\u601d -&gt; https://a.example/x</div>"]);
+  /* 老内容一律保留：不是这张卡标签的行、只有链接没有标签的老写法 */
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""]);
+  addTag(e.dom, "\u5510\u8bd7");
+  e.install("choice", "", { tags: ["\u5510\u8bd7"] });
+  e.api.applyNativeValues([
+    "Q",
+    "*\u7532",
+    "",
+    "",
+    "",
+    "\u9759\u591c\u601d\u5168\u6587 -> https://a.example/old\nhttps://a.example/bare"
+  ]);
   var hint = e.dom.document.getElementById("iq-ed-knowhint");
-  ok("H23 HTML 里的链接也能读出来", hint.textContent.indexOf("\u9759\u591c\u601d") >= 0, hint.textContent);
-  ok("H24 认出是网址", hint.textContent.indexOf("\u7f51\u5740") >= 0, hint.textContent);
-  eq("H25 目标是那个网址", e.api.knowledgeTarget(), "https://a.example/x");
+  ok("H30 预览里列出会显示的标签", hint.textContent.indexOf("\u9759\u591c\u601d\u5168\u6587") >= 0, hint.textContent);
+  e.fire(e.dom.document.getElementById("iq-ed-knowtoggle"), "click");
+  var panel = e.dom.document.getElementById("iq-ed-knowpanel");
+  eq("H31 标签行 + 老内容行都排出来", panel.querySelectorAll(".iq-ed-knowrow").length, 3);
+  eq(
+    "H32 没有标签的老行行名就是原文",
+    panel.querySelectorAll(".iq-ed-knowrow-name")[2].textContent,
+    "https://a.example/bare"
+  );
+
+  panel.querySelectorAll(".iq-ed-knowrow-input")[0].value = "https://a.example/typed";
+  addTag(e.dom, "\u5b8b\u8bcd");
+  var minis = panel.querySelectorAll(".iq-ed-mini");
+  e.fire(minis[minis.length - 1], "click");
+  var panel2 = e.dom.document.getElementById("iq-ed-knowpanel");
+  eq("H33 刷新后带上新标签", panel2.querySelectorAll(".iq-ed-knowrow").length, 4);
+  eq(
+    "H34 刷新不丢刚打进去、还没提交的内容",
+    panel2.querySelectorAll(".iq-ed-knowrow-input")[0].value,
+    "https://a.example/typed"
+  );
+  e.fire(panel2.querySelectorAll(".iq-ed-knowrow-input")[0], "blur");
+  eq(
+    "H35 老的单行链接写回去时还是只有链接",
+    e.stored("\u77e5\u8bc6\u70b9"),
+    "\u5510\u8bd7 -> https://a.example/typed\n\u9759\u591c\u601d\u5168\u6587 -> https://a.example/old\nhttps://a.example/bare"
+  );
 })();
 
 (function () {
   var t = makeEditor(["Q", "\u5bf9", "", "", "", ""], TF_FIELDS);
   t.install("tf");
-  ok("H26 判断题也有知识点预览", !!t.dom.document.getElementById("iq-ed-knowbar"));
+  ok("H36 判断题也有知识点配置", !!t.dom.document.getElementById("iq-ed-knowtoggle"));
+  var c = makeEditor(["", "", "", "", ""], CLOZE_FIELDS);
+  c.install("cloze");
+  ok("H37 填空题也有知识点配置", !!c.dom.document.getElementById("iq-ed-knowtoggle"));
+})();
+
+/* ---------- 1.1.3 起三个题型都没有「答案」字段，相关的说明行也撤了 ---------- */
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""]);
+  e.install("choice");
+  eq("H27 选择题没有「答案」说明行了", e.dom.document.getElementById("iq-ed-answerhint"), null);
+})();
+
+(function () {
+  var c = makeEditor(["", "", "", "", ""], CLOZE_FIELDS);
+  c.install("cloze");
+  eq("H28 填空题也没有说明行了", c.dom.document.getElementById("iq-ed-answerhint"), null);
+})();
+
+(function () {
+  var t = makeEditor(["Q<!--iq-tf:\u5bf9-->", "", "", "", ""], TF_FIELDS);
+  t.install("tf");
+  eq("H29 判断题也没有说明行", t.dom.document.getElementById("iq-ed-answerhint"), null);
+  ok("H30 判断题勾选框照样有", !!t.dom.document.querySelector(".iq-ed-box"));
+})();
+
+/* ---------- 1.1.4：题型里万一还残留「答案」字段（Anki 不肯删），编辑器里整块藏起来 ---------- */
+(function () {
+  var OLD_CHOICE = ["\u9898\u76ee", "\u9009\u9879", "\u7b54\u6848", "\u89e3\u6790", "\u89e3\u9898\u6280\u5de7", "\u6765\u6e90"];
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""], OLD_CHOICE);
+  e.install("choice");
+  eq(
+    "H33 选择题残留的「答案」整块藏起来",
+    e.answerField().parentNode.style.display,
+    "none"
+  );
+  eq("H34 选项块也藏得好好的", e.optionField().parentNode.style.display, "none");
+})();
+
+(function () {
+  var OLD_CLOZE = ["\u9898\u76ee", "\u89e3\u6790", "\u89e3\u9898\u6280\u5de7", "\u6765\u6e90", "\u7b54\u6848"];
+  var c = makeEditor(["\u9898\u5e72", "", "", "", ""], OLD_CLOZE);
+  c.install("cloze");
+  eq("H35 填空题残留的「答案」也藏起来", c.answerField().parentNode.style.display, "none");
+})();
+
+(function () {
+  var OLD_TF = ["\u9898\u76ee", "\u7b54\u6848", "\u89e3\u6790", "\u89e3\u9898\u6280\u5de7", "\u6765\u6e90"];
+  var t = makeEditor(["\u9898\u5e72<!--iq-tf:\u5bf9-->", "", "", "", ""], OLD_TF);
+  t.install("tf");
+  eq("H36 判断题残留的「答案」也藏起来", t.answerField().parentNode.style.display, "none");
+  ok("H37 判断题勾选框照常能用", t.dom.document.querySelectorAll(".iq-ed-box").length >= 1);
 })();
 
 (function () {

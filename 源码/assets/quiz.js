@@ -403,10 +403,37 @@
     return node ? node.innerHTML : "";
   }
 
+  /* 判断题的真值存在题目末尾的隐藏标记里：正文<!--iq-tf:对-->（1.1.3 起） */
+  var TF_MARKER_RE = /<!--\s*iq-tf\s*[:：]\s*([^\s>\-]*)\s*-->/i;
+
+  function tfMarkerFlag(html) {
+    var match = TF_MARKER_RE.exec(String(html === null || html === undefined ? "" : html));
+    if (!match) {
+      return "";
+    }
+    var flag = trim(match[1]);
+    return flag === "\u5bf9" || flag === "\u9519" ? flag : "";
+  }
+
+  /* 先看隐藏副本，再看渲染出来的题目（两处都能拿到标记） */
+  function readTfFlag() {
+    var flag = tfMarkerFlag(rawHTML("iq-raw-question"));
+    if (flag) {
+      return flag;
+    }
+    var qEl = $("iq-question");
+    return qEl ? tfMarkerFlag(qEl.innerHTML) : "";
+  }
+
   function readData() {
     var options = parseOptions(splitLines(rawHTML("iq-raw-options")));
     var answers = parseAnswerGroups(splitLines(rawHTML("iq-raw-answer")));
     var hint = splitLines(rawHTML("iq-raw-type")).join(" ");
+    /* 判断题：真值来自标记；老卡（还有「答案」字段的）走下面的 answers 兜底 */
+    var tfFlag = readTfFlag();
+    if (tfFlag) {
+      answers = [[tfFlag]];
+    }
     return {
       options: options,
       answers: answers,
@@ -421,14 +448,13 @@
     };
   }
 
-  /* 「知识点」：制卡时填的链接（或 Anki 搜索式）。
-     第一行有效，可以写「标题 -> 目标」，也可以只写目标（那标题就用目标本身）。 */
-  function parseKnowledge(html) {
-    var lines = splitLines(html);
-    if (!lines.length) {
+  /* 「知识点」：制卡时一行写一条「标签 -> 链接」（只写链接也认），
+     卡片上每个标签一个可点的标签，点谁跳谁；标签重复只留第一条。 */
+  function parseKnowledgeLine(line) {
+    var first = trim(line);
+    if (!first) {
       return null;
     }
-    var first = lines[0];
     var label = first;
     var target = first;
     var cut = first.indexOf("->");
@@ -447,6 +473,24 @@
     return { label: label || target, target: target };
   }
 
+  function parseKnowledge(html) {
+    var lines = splitLines(html);
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < lines.length; i++) {
+      var item = parseKnowledgeLine(lines[i]);
+      if (!item) {
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(seen, item.label)) {
+        continue;
+      }
+      seen[item.label] = true;
+      out.push(item);
+    }
+    return out;
+  }
+
   function isWebLink(target) {
     return /^(https?|mailto|file|ftp):/i.test(String(target || ""));
   }
@@ -457,47 +501,54 @@
   }
 
   function buildKnowledgeNode(data) {
-    var k = data && data.knowledge;
-    if (!k) {
+    var items = data && data.knowledge;
+    if (!items || !items.length) {
       return null;
     }
     var wrap = el("div", "iq-know");
-    var label = "\ud83d\udcda \u76f8\u5173\u77e5\u8bc6\u70b9\uff1a" + k.label;
-    if (isWebLink(k.target)) {
-      var link = document.createElement("a");
-      link.className = "iq-know-btn";
-      link.setAttribute("href", k.target);
-      link.setAttribute("target", "_blank");
-      link.setAttribute("rel", "noopener");
-      link.appendChild(el("span", "iq-know-text", label));
-      link.addEventListener("click", function (ev) {
-        /* 桌面插件能处理就拦下来，交给系统浏览器；手机上让它自己跳 */
-        if (openKnowledge(k.target) && ev && ev.preventDefault) {
-          ev.preventDefault();
-        }
-      });
-      wrap.appendChild(link);
-    } else {
-      var btn = el("button", "iq-know-btn", label);
-      btn.setAttribute("type", "button");
-      var hosted = hostPresent();
-      btn.addEventListener("click", function () {
-        if (!openKnowledge(k.target) && !hosted) {
-          show(hint, true);
-        }
-      });
-      wrap.appendChild(btn);
-      var hint = el(
-        "div",
-        "iq-know-hint",
-        "\u5728 Anki \u91cc\u641c\uff1a" + k.target
-      );
-      if (hosted) {
+    wrap.appendChild(el("div", "iq-know-label", "\ud83d\udcda \u76f8\u5173\u77e5\u8bc6\u70b9"));
+    var box = el("div", "iq-know-tags");
+    var searches = [];
+    for (var i = 0; i < items.length; i++) {
+      buildKnowledgeChip(box, items[i], searches);
+    }
+    wrap.appendChild(box);
+    if (searches.length) {
+      var hint = el("div", "iq-know-hint", "\u5728 Anki \u91cc\u641c\uff1a" + searches.join("\uff1b"));
+      if (hostPresent()) {
         show(hint, false);
       }
       wrap.appendChild(hint);
     }
     return wrap;
+  }
+
+  /* 一个标签一个可点的标签：网址在桌面端交给插件开浏览器（手机上就是普通链接），
+     非网址交给插件在卡片浏览器里搜。 */
+  function buildKnowledgeChip(box, item, searches) {
+    if (isWebLink(item.target)) {
+      var link = document.createElement("a");
+      link.setAttribute("class", "iq-know-btn");
+      link.setAttribute("href", item.target);
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener");
+      link.appendChild(el("span", "iq-know-text", item.label));
+      link.addEventListener("click", function (ev) {
+        /* 桌面插件能处理就拦下来，交给系统浏览器；手机上让它自己跳 */
+        if (openKnowledge(item.target) && ev && ev.preventDefault) {
+          ev.preventDefault();
+        }
+      });
+      box.appendChild(link);
+      return;
+    }
+    var btn = el("button", "iq-know-btn", item.label);
+    btn.setAttribute("type", "button");
+    btn.addEventListener("click", function () {
+      openKnowledge(item.target);
+    });
+    box.appendChild(btn);
+    searches.push(item.target);
   }
 
   /* =====================================================================
@@ -1065,11 +1116,10 @@
     if (mode === "choice") {
       lockOptions(api, correct, picked);
     } else {
-      lockInputs(api);
+      revealFillBlanks(api);
     }
     show(api.controlsBox, false);
 
-    var isFill = !api.optionsBox.getAttribute("data-count");
     var hosted = !!api.hosted;
     var title;
     if (fromDontKnow) {
@@ -1087,13 +1137,6 @@
     clear(feedback);
     feedback.className = "iq-feedback " + (correct ? "iq-ok" : partial ? "iq-warn" : "iq-no");
     feedback.appendChild(el("div", "iq-verdict", title));
-
-    if (!correct) {
-      var answerLine = el("div", "iq-answer-line");
-      answerLine.appendChild(el("span", "iq-answer-label", "\u6b63\u786e\u7b54\u6848\uff1a"));
-      answerLine.appendChild(el("span", "iq-answer-value", answerSummary(api, isFill)));
-      feedback.appendChild(answerLine);
-    }
 
     var showExplain = !correct || api.cfg.reveal_explanation_on_correct;
     if (showExplain && api.data.explanationText) {
@@ -1175,47 +1218,32 @@
     }
   }
 
-  function lockInputs(api) {
+  /* 判完之后把答案写进空位本身（1.1.5 起不再在反馈区列「正确答案」）：
+     答对 -> 卡片里的标准答案；答错 / 不知道 -> 划掉的你填的 + 箭头 + 标准答案。
+     这个空本来就没录答案时，保持输入框本来的对错着色。 */
+  function revealFillBlanks(api) {
     var inputs = collectInputs(api);
     for (var i = 0; i < inputs.length; i++) {
       var input = inputs[i];
       var idx = parseInt(input.getAttribute("data-blank"), 10);
       var group = api.data.answers[idx - 1];
       var ok = isBlankCorrect(input.value, group, api.cfg);
-      input.readOnly = true;
-      input.classList.add(ok ? "iq-input-ok" : "iq-input-no");
-      if (!ok && group && group.length) {
-        input.setAttribute("title", "\u6b63\u786e\u7b54\u6848\uff1a" + group.join(" / "));
+      var typed = trim(input.value);
+      var right = group && group.length ? String(group[0]) : "";
+      var blank = input.parentNode;
+      if (!right || !blank) {
+        /* 没录答案的空：没得揭晓，保持输入框本来的对错着色 */
+        input.readOnly = true;
+        input.classList.add(ok ? "iq-input-ok" : "iq-input-no");
+        continue;
       }
+      clear(blank);
+      if (!ok && typed) {
+        blank.appendChild(el("s", "iq-fill-typed", typed));
+        blank.appendChild(el("span", "iq-fill-arrow", "\u2192"));
+      }
+      blank.appendChild(el("span", "iq-blank-filled", right));
     }
-  }
-
-  function answerSummary(api, isFill) {
-    if (isFill) {
-      if (api.cloze) {
-        /* 原生填空：这一张卡就一个（或同号几个）空，直接列答案 */
-        var one = [];
-        for (var c = 0; c < api.data.answers.length; c++) {
-          var text = api.data.answers[c] && api.data.answers[c].length ? api.data.answers[c][0] : "";
-          if (text && one.indexOf(text) < 0) {
-            one.push(text);
-          }
-        }
-        return one.join("\u3000") || "\uff08\u672a\u8bbe\u7f6e\uff09";
-      }
-      var parts = [];
-      for (var i = 0; i < api.data.answers.length; i++) {
-        parts.push((i + 1) + ") " + api.data.answers[i].join(" / "));
-      }
-      return parts.join("    ") || "\uff08\u672a\u8bbe\u7f6e\uff09";
-    }
-    var out = [];
-    for (var j = 0; j < api.items.length; j++) {
-      if (api.items[j].correct) {
-        out.push(letterFor(j) + ". " + api.items[j].text);
-      }
-    }
-    return out.join("\uff1b") || "\uff08\u672a\u8bbe\u7f6e\uff09";
   }
 
   function buildGradeButtons(api) {
@@ -1340,8 +1368,10 @@
 
   function renderBack(card, data, cfg) {
     var qEl = $("iq-question");
-    var blankMax = qEl ? replaceBlanks(qEl) : 0;
-    if (qEl) {
+    /* 判断题的真值来自题目标记，不是空位答案：背面画两个着色选项，别把它当「多出来的答案」贴在题目后面 */
+    var isTfCard = data.options.length < 2 && tfValue(data.answers[0]) !== null;
+    var blankMax = qEl && !isTfCard ? replaceBlanks(qEl) : 0;
+    if (qEl && !isTfCard) {
       var spans = qEl.querySelectorAll(".iq-blank");
       for (var i = 0; i < spans.length; i++) {
         var idx = parseInt(spans[i].getAttribute("data-blank"), 10);
@@ -1372,18 +1402,20 @@
         }
       }
     } else {
-      var ansBox = $("iq-answer-list");
-      if (ansBox) {
-        clear(ansBox);
-        if (!data.answers.length) {
-          ansBox.appendChild(el("div", "iq-answer-value", "\uff08\u672a\u8bbe\u7f6e\uff09"));
-        } else {
-          for (var a = 0; a < data.answers.length; a++) {
-            var row = el("div", "iq-answer-row");
-            row.appendChild(el("span", "iq-answer-no", String(a + 1)));
-            row.appendChild(el("span", "iq-answer-value", data.answers[a].join(" / ")));
-            ansBox.appendChild(row);
-          }
+      /* 判断题没有「选项」字段：背面现画出「正确 / 错误」两项，靠颜色说明对错 */
+      var tfBox = $("iq-options");
+      if (isTfCard && tfBox) {
+        var truth = tfValue(data.answers[0]);
+        clear(tfBox);
+        var tfItems = [
+          { text: "\u6b63\u786e / \u5bf9", correct: truth === true },
+          { text: "\u9519\u8bef / \u9519", correct: truth === false }
+        ];
+        for (var t = 0; t < tfItems.length; t++) {
+          var tfNode = el("div", "iq-opt iq-locked" + (tfItems[t].correct ? " iq-correct" : ""));
+          tfNode.appendChild(el("span", "iq-opt-key", letterFor(t)));
+          tfNode.appendChild(el("span", "iq-opt-text", tfItems[t].text));
+          tfBox.appendChild(tfNode);
         }
       }
     }
@@ -1421,7 +1453,6 @@
     if (knowBox && knowNode) {
       knowBox.appendChild(knowNode);
     }
-    show($("iq-answer-block"), data.options.length < 2 && data.answers.length > 0);
   }
 
   function reportError(err) {

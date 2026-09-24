@@ -341,7 +341,11 @@ ok(
 ok("P7 JS 已内联", "__IQ_CORE" in qfmt and "__IQ_CORE" in afmt)
 ok("P8 占位符已替换", "{{__IQ_JS__}}" not in qfmt and "{{__IQ_JS__}}" not in afmt)
 ok("P9 配置注入点存在", mod.CONFIG_MARKER in qfmt)
-ok("P10 背面有答案区", 'id="iq-answer-list"' in afmt)
+ok(
+    "P10 背面不再有答案文字区",
+    "iq-answer-list" not in afmt and "iq-answer-block" not in afmt,
+)
+ok("P10b 背面照样有选项 / 解析区", 'id="iq-options"' in afmt and 'id="iq-explanation"' in afmt)
 ok("P11 样式已写入", "iq-card" in nt["css"] and len(nt["css"]) > 500)
 mod.ensure_choice_note_type()
 eq("P12 字段不重复", len(nt["flds"]), len(mod.CHOICE_FIELD_NAMES))
@@ -638,7 +642,8 @@ ok("P101 判断题题型已建立", mw.col.models.by_name(mod.TF_NOTE_TYPE_NAME)
 nt_tf = mw.col.models.by_name(mod.TF_NOTE_TYPE_NAME)
 eq("P102 判断题字段", [f["name"] for f in nt_tf["flds"]], mod.TF_FIELD_NAMES)
 ok("P103 判断题没有选项字段", "选项" not in [f["name"] for f in nt_tf["flds"]])
-ok("P104 判断题模板引用答案", "{{答案}}" in nt_tf["tmpls"][0]["qfmt"])
+ok("P104 判断题模板留了题目的隐藏副本（找真值标记用）", "iq-raw-question" in nt_tf["tmpls"][0]["qfmt"])
+ok("P104b 判断题模板不再引用「答案」", "{{答案}}" not in nt_tf["tmpls"][0]["qfmt"])
 
 eq("P105 选择题里没有「类型」字段", "类型" in [f["name"] for f in nt["flds"]], False)
 eq("P106 选择题字段表", [f["name"] for f in nt["flds"]], mod.CHOICE_FIELD_NAMES)
@@ -742,6 +747,17 @@ ok("P116 注入了编辑器助手脚本", len(ed_choice.web.evals) == 1)
 ok("P117 注入内容带安装调用", "__IQ_EDITOR_INSTALL__" in ed_choice.web.evals[0])
 ok("P118 注入内容带字段表", "\\u9009\\u9879" in ed_choice.web.evals[0] or "选项" in ed_choice.web.evals[0])
 
+# 1.1.6：「知识点」在编辑器里按标签逐行配链接，注入时先把已保存的标签带上
+ed_choice.note.tags = ["唐诗", "", "   "]
+mod.on_editor_did_load_note(ed_choice)
+ok(
+    "P250 注入时带上这张卡的标签",
+    '"tags": ["唐诗"]' in ed_choice.web.evals[-1],
+    ed_choice.web.evals[-1][-260:],
+)
+eq("P251 没有标签时给空表", mod._editor_tags(types.SimpleNamespace(note=types.SimpleNamespace())), [])
+eq("P252 取不到笔记也不炸", mod._editor_tags(types.SimpleNamespace()), [])
+
 ed_other = FakeEditor("Lapis", ["A", "B"])
 mod.on_editor_did_load_note(ed_other)
 ok("P119 别的题型也注入但模式为空", '"mode": ""' in ed_other.web.evals[0])
@@ -751,8 +767,20 @@ eq("P120 不再往工具栏塞按钮", mod.__dict__.get("on_editor_did_init_butt
 before_evals = len(ed_choice.web.evals)
 hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:add-option", ed_choice)
 eq("P121 没人处理的编辑器消息不会产生动作", len(ed_choice.web.evals), before_evals)
-ok("P122 选择题字段里没有「答案」", "答案" not in mod.CHOICE_FIELD_NAMES)
-ok("P123 判断题仍然有「答案」字段（存对/错）", "答案" in mod.TF_FIELD_NAMES)
+ok("P122 选择题不再有「答案」字段", "答案" not in mod.CHOICE_FIELD_NAMES)
+ok("P123 判断题不再有「答案」字段（真值改存题目标记）", "答案" not in mod.TF_FIELD_NAMES)
+ok("P123b 填空题也不再补「答案」", "答案" not in mod.CLOZE_FIELD_NAMES)
+ok(
+    "P123c 三个题型的正面模板都不再引用「答案」",
+    all(
+        "{{答案}}" not in mw.col.models.by_name(name)["tmpls"][0]["qfmt"]
+        for name in (mod.CHOICE_NOTE_TYPE_NAME, mod.TF_NOTE_TYPE_NAME, mod.CLOZE_NOTE_TYPE_NAME)
+    ),
+)
+ok(
+    "P123d 选择题模板也不再带答案隐藏区",
+    'id="iq-raw-answer"' not in nt["tmpls"][0]["qfmt"],
+)
 
 # ------------------------------------------------------------------ 编辑器里的写回
 # 2026-09-23 修的 bug：以前脚本把内容写进 DOM 里那个 textarea，而新版 Anki 编辑器的
@@ -770,20 +798,48 @@ hooks["webview_did_receive_js_message"].run(
     (False, None), "iq:editor:set:1:" + quote("甲\n*乙\n丙"), ed_write
 )
 ok("P147 写回前先让编辑器保存一次", ed_write.saved == 1, ed_write.saved)
-_write_js = ed_write.web.evals[-1] if ed_write.web.evals else ""
+# 写回是两段 JS：先 setFields 写字段，再把最新值推回页面刷新提示
+_write_js = "".join(ed_write.web.evals[-2:])
 ok("P148 写回时用页面自己的 setFields", "setFields(" in _write_js, _write_js[:200])
 ok("P149 写回时把字段名一起传过去", json.dumps("选项", ensure_ascii=False) in _write_js)
 ok("P150 写回的内容是我们给的那一份", json.dumps("甲\n*乙\n丙", ensure_ascii=False) in _write_js)
 ok("P151 其它字段原样保留", "题目内容" in _write_js)
+ok("P151b 写完还会把最新值推回页面", "applyNativeValues(" in (ed_write.web.evals[-1] if ed_write.web.evals else ""))
 
 ed_tf = FakeEditor(mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES)
 mod.on_editor_did_load_note(ed_tf)
 ed_tf.web.evals.clear()
-ed_tf.note.fields = ["题干", "", "", "", ""]
+ed_tf.note.fields = ["太阳从西边升起。", "", "", "", ""]
+ed_tf.note.id = 4242
 hooks["webview_did_receive_js_message"].run(
-    (False, None), "iq:editor:set:1:" + quote("对"), ed_tf
+    (False, None), "iq:editor:tf:" + quote("对"), ed_tf
 )
-ok("P152 判断题也能写回", "setFields(" in (ed_tf.web.evals[-1] if ed_tf.web.evals else ""))
+_tf_js = ed_tf.web.evals[-1] if ed_tf.web.evals else ""
+_tf_js_all = "".join(ed_tf.web.evals[-2:])
+ok("P152 判断题勾选会把标记写进题目", "iq-tf:\\u5bf9" in _tf_js_all or "iq-tf:对" in _tf_js_all, _tf_js_all[:160])
+ok("P152b 写的时候用 setFields", "setFields(" in _tf_js_all)
+ok("P152c 真值记进了小账本", mod.load_tf_flags().get("4242") == "对", mod.load_tf_flags())
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+
+# 再点一次「错」：旧的标记要被换掉，不能两个都在
+ed_tf.web.evals.clear()
+hooks["webview_did_receive_js_message"].run(
+    (False, None), "iq:editor:tf:" + quote("错"), ed_tf
+)
+_tf_js2 = ed_tf.web.evals[-1] if ed_tf.web.evals else ""
+ok(
+    "P152d 再写一次是「错」，且不会出现两个标记",
+    ("iq-tf:\\u9519" in _tf_js2 or "iq-tf:错" in _tf_js2)
+    and ("iq-tf:\\u5bf9" not in _tf_js2 and "iq-tf:对" not in _tf_js2),
+    _tf_js2[:200],
+)
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
 
 before_evals = len(ed_write.web.evals)
 hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:whatever", ed_write)
@@ -806,20 +862,47 @@ ok("P157 推回的内容里有挖空", "{{c1::" in _refresh_js, _refresh_js[:300
 # ------------------------------------------------------------------ 相关知识点
 ok("P158 三个题型都有「知识点」字段", all(mod.KNOWLEDGE_FIELD in names for names in (
     mod.CHOICE_FIELD_NAMES, mod.TF_FIELD_NAMES, mod.CLOZE_FIELD_NAMES)))
-ok("P159 字段排在最后（不动老字段顺序）", mod.CHOICE_FIELD_NAMES[-1] == mod.KNOWLEDGE_FIELD)
+ok(
+    "P159 追加的字段都排在最后（不动老字段顺序）",
+    mod.CHOICE_FIELD_NAMES[:5] == ["题目", "选项", "解析", "解题技巧", "来源"]
+    and mod.CHOICE_FIELD_NAMES[5:] == [mod.KNOWLEDGE_FIELD],
+)
 eq("P160 知识点字段映射到隐藏区", mod._RAW_IDS.get(mod.KNOWLEDGE_FIELD), "iq-raw-knowledge")
 nt_choice = mw.col.models.by_name(mod.CHOICE_NOTE_TYPE_NAME)
 ok("P161 卡片模板带知识点内容", "{{%s}}" % mod.KNOWLEDGE_FIELD in nt_choice["tmpls"][0]["qfmt"])
 ok("P162 答案面有知识点区块", 'id="iq-knowledge"' in nt_choice["tmpls"][0]["afmt"])
+# 1.1.6：卡片端把「相关知识点」画成一排可点的标签，样式得跟着进题型
+ok(
+    "P254 题型样式带 1.1.6 的知识点标签样式",
+    ".iq-know-tags" in nt_choice["css"] and ".iq-know-label" in nt_choice["css"],
+    nt_choice["css"][:80],
+)
 
-eq("P163 只有网址时标题就是网址", mod.parse_knowledge("https://a.example/x"),
-   ("https://a.example/x", "https://a.example/x"))
-eq("P164 支持「标题 -> 目标」", mod.parse_knowledge("唐诗格律 -> anki:search:tag:唐诗"),
-   ("唐诗格律", "anki:search:tag:唐诗"))
-eq("P165 支持全角箭头", mod.parse_knowledge("唐诗格律 → tag:唐诗"), ("唐诗格律", "tag:唐诗"))
+eq("P163 只有网址时标签就是网址", mod.parse_knowledge("https://a.example/x"),
+   [("https://a.example/x", "https://a.example/x")])
+eq("P164 支持「标签 -> 目标」", mod.parse_knowledge("唐诗格律 -> anki:search:tag:唐诗"),
+   [("唐诗格律", "anki:search:tag:唐诗")])
+eq("P165 支持全角箭头", mod.parse_knowledge("唐诗格律 → tag:唐诗"), [("唐诗格律", "tag:唐诗")])
 eq("P166 HTML 字段也能解析", mod.parse_knowledge("<div>唐诗 -&gt; tag:唐诗</div>"),
-   ("唐诗", "tag:唐诗"))
-eq("P167 空字段返回空", mod.parse_knowledge("<br>"), ("", ""))
+   [("唐诗", "tag:唐诗")])
+eq("P167 空字段返回空", mod.parse_knowledge("<br>"), [])
+eq(
+    "P240 多行全都算（不再只看第一行）",
+    mod.parse_knowledge("唐诗 -> https://a.example/t\n宋词 -> anki:search:tag:宋词\n\n   \n"),
+    [("唐诗", "https://a.example/t"), ("宋词", "anki:search:tag:宋词")],
+)
+eq(
+    "P241 标签重复只留第一条",
+    mod.parse_knowledge("唐诗 -> https://a.example/1\n唐诗 -> https://a.example/2"),
+    [("唐诗", "https://a.example/1")],
+)
+eq("P242 单行解析：只写链接", mod.parse_knowledge_line("  tag:唐诗  "), ("tag:唐诗", "tag:唐诗"))
+eq("P243 单行解析：空行", mod.parse_knowledge_line("   "), ("", ""))
+eq(
+    "P244 HTML 里的多行",
+    mod.parse_knowledge("<div>唐诗 -&gt; https://a.example/x</div><div>宋词 -&gt; tag:宋词</div>"),
+    [("唐诗", "https://a.example/x"), ("宋词", "tag:宋词")],
+)
 
 eq("P168 网址不进 Anki 搜索", mod.knowledge_query("https://a.example"), "")
 eq("P169 anki:search 前缀", mod.knowledge_query("anki:search:tag:唐诗"), "tag:唐诗")
@@ -894,7 +977,7 @@ ed_tips.note.tags = ["唐诗"]
 payload = mod.gather_tips(ed_tips)
 eq("P179 找到同标签且有技巧的卡片", len(payload["items"]), 2)
 eq("P180 共同标签多的排前面", payload["items"][0]["nid"], 12)
-eq("P181 带出题目做标题", payload["items"][0]["title"], "题二")
+ok("P181 候选项里不再带题目", not (payload["items"][0].get("title")), sorted(payload["items"][0].keys()))
 ok("P182 查询里带了标签", 'tag:"唐诗"' in fake_tip_col.queries[0], fake_tip_col.queries[0])
 
 ed_tips.note.tags = []
@@ -917,6 +1000,22 @@ hooks["webview_did_receive_js_message"].run(
 _tips_js = ed_tipmsg.web.evals[-1] if ed_tipmsg.web.evals else ""
 ok("P186 页面上的标签也会用来找", "先想朝代" in _tips_js, _tips_js[:200])
 ok("P187 回推里带着标签", "唐诗" in _tips_js, _tips_js[:200])
+
+# 文字一样（只有空格 / 换行 / HTML 不同）的技巧只留一条，留共同标签最多、最新的那张
+dup_notes = [
+    FakeTipNote(21, ["唐诗"], "题甲", "先看选项 \n 再想朝代"),
+    FakeTipNote(22, ["唐诗", "宋词"], "题乙", "先看选项再想朝代"),
+    FakeTipNote(23, ["唐诗"], "题丙", "另一条技巧"),
+    FakeTipNote(24, ["唐诗", "宋词"], "题丁", "<b>先看选项</b>再想朝代"),
+]
+mw.col = FakeTipCol(dup_notes)
+ed_tips.note.tags = ["唐诗"]
+payload = mod.gather_tips(ed_tips)
+eq("P245 同一段技巧只留一条", len(payload["items"]), 2)
+eq("P246 留的是排最前面那条（共同标签多、更新）", payload["items"][0]["nid"], 24)
+eq("P247 另一段技巧照常留着", payload["items"][1]["nid"], 23)
+eq("P248 「共几条」也按去重后算", payload["total"], 2)
+eq("P249 判重键忽略所有空白", mod.tip_key("先看选项\n 再想朝代"), "先看选项再想朝代")
 mw.col = saved_col
 
 _open_calls = []
@@ -933,6 +1032,195 @@ hooks["webview_did_receive_js_message"].run(
 eq("P189 编辑器里「试打开」也会去打开", _open_calls, ["https://a.example/x"])
 mod.open_knowledge = _saved_open
 
+# ------------------------------------------------------------------ 判断题真值标记（1.1.3）
+eq("P200 答案写法归一：对", mod.tf_flag_from_answer("对"), "对")
+eq("P201 答案写法归一：√", mod.tf_flag_from_answer(" √ "), "对")
+eq("P202 答案写法归一：错", mod.tf_flag_from_answer("错"), "错")
+eq("P203 认不出的写法返回空", mod.tf_flag_from_answer("也许吧"), "")
+eq("P204 写标记", mod.with_tf_marker("太阳从西边升起。", "错"), "太阳从西边升起。<!--iq-tf:错-->")
+eq(
+    "P205 重复写是幂等的（换真值会替换旧的）",
+    mod.with_tf_marker(mod.with_tf_marker("题干", "对"), "错"),
+    "题干<!--iq-tf:错-->",
+)
+eq("P206 从题目里读标记", mod.tf_marker_flag("题干<!--iq-tf:对-->"), "对")
+eq("P207 没有标记就是空", mod.tf_marker_flag("题干"), "")
+eq("P208 标记里写别的东西不算", mod.tf_marker_flag("题干<!--iq-tf:可能-->"), "")
+eq("P209 标记对搜索/排序字段不可见", mod._html_to_text("题干<!--iq-tf:对-->").strip(), "题干")
+
+
+class FakeTfNote:
+    def __init__(self, nid, question, answer):
+        self.id = nid
+        self.fields = [question, answer, "", "", "", ""]
+
+
+class FakeTfModels:
+    def __init__(self, nt):
+        self.nt = nt
+        self.removed = []
+
+    def by_name(self, name):
+        return self.nt if name == self.nt["name"] else None
+
+    def remove_field(self, nt, field):
+        nt["flds"] = [f for f in nt["flds"] if f is not field]
+        self.removed.append(field.get("name"))
+
+
+class FakeTfCol:
+    def __init__(self, notes, nt):
+        self.notes = notes
+        self.models = FakeTfModels(nt)
+        self.updated = []
+
+    def find_notes(self, query):
+        if "答案:_*" in query:
+            return [n.id for n in self.notes if str(n.fields[1]).strip()]
+        return [n.id for n in self.notes]
+
+    def get_note(self, nid):
+        for n in self.notes:
+            if n.id == nid:
+                return n
+        raise KeyError(nid)
+
+    def update_note(self, note):
+        self.updated.append(note.id)
+
+
+_tf_nt = {
+    "name": mod.TF_NOTE_TYPE_NAME,
+    "flds": [{"name": n} for n in ["题目", "答案", "解析", "解题技巧", "来源", "知识点"]],
+}
+_tf_notes = [
+    FakeTfNote(501, "太阳从西边升起。", "错"),
+    FakeTfNote(502, "地球是圆的。", "对"),
+    FakeTfNote(503, "这是没设过答案的卡。", ""),
+]
+_tf_col = FakeTfCol(_tf_notes, _tf_nt)
+_saved_col2 = mw.col
+mw.col = _tf_col
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+eq("P210 迁移两张有答案的判断题", mod.migrate_tf_flags(), 2)
+ok("P211 真值进了题目标记", mod.tf_marker_flag(_tf_notes[0].fields[0]) == "错")
+ok("P212 原来题目内容没变", _tf_notes[0].fields[0].startswith("太阳从西边升起。"))
+ok("P213 「答案」被清空", _tf_notes[0].fields[1] == "" and _tf_notes[1].fields[1] == "")
+eq("P214 小账本记了真值", mod.load_tf_flags().get("501"), "错")
+ok("P215 迁移写回了笔记", _tf_col.updated == [501, 502], _tf_col.updated)
+ok("P216 空字段现在可以删了", mod.drop_field_if_empty(_tf_col, _tf_nt, "答案") is True)
+ok("P217 题型里已经没有「答案」", "答案" not in [f["name"] for f in _tf_nt["flds"]])
+eq("P218 删的就是那个字段", _tf_col.models.removed, ["答案"])
+
+# 用户手滑把题目里的标记删掉了 → 启动时按小账本补回来
+_tf_notes[0].fields[0] = "太阳从西边升起。"
+eq("P219 自愈补回一张", mod.heal_tf_markers(), 1)
+ok("P220 补回的是原来那个真值", mod.tf_marker_flag(_tf_notes[0].fields[0]) == "错")
+eq("P221 不需要补的不会乱动", mod.heal_tf_markers(), 0)
+# 新笔记（还没入库、id=0）不用记进小账本
+_flags_before = mod.load_tf_flags()
+mod.remember_tf_flag(0, "对")
+ok(
+    "P222 新笔记不记小账本",
+    "0" not in mod.load_tf_flags() and mod.load_tf_flags() == _flags_before,
+    mod.load_tf_flags(),
+)
+mw.col = _saved_col2
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+
+# ------------------------------------------------------------------ 1.1.4：删字段的多重保险 + 报告
+class RetryTfModels(FakeTfModels):
+    """模拟 Anki 第一次删失败、清掉「禁止删除」后再删就成功的场景。"""
+
+    def __init__(self, nt, fail_times=1):
+        super().__init__(nt)
+        self.calls = 0
+        self.fail_times = fail_times
+
+    def remove_field(self, nt, field):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RuntimeError("field is protected (试一次)")
+        super().remove_field(nt, field)
+
+
+class AnswerFieldCol(FakeTfCol):
+    def __init__(self, notes, nt, models):
+        super().__init__(notes, nt)
+        self.models = models
+
+
+_nt2 = {
+    "name": mod.TF_NOTE_TYPE_NAME,
+    "flds": [{"name": n} for n in ["题目", "答案", "解析", "解题技巧", "来源", "知识点"]],
+}
+_nt2["flds"][1]["preventDeletion"] = True
+_nt2["flds"][1]["config"] = {"prevent_deletion": True}
+_notes2 = [FakeTfNote(601, "太阳从西边升起。<!--iq-tf:错-->", "")]
+_models2 = RetryTfModels(_nt2, fail_times=1)
+_col2 = AnswerFieldCol(_notes2, _nt2, _models2)
+_info2: dict = {}
+ok("P223 第一次删失败、清掉禁止删除后重试成功", mod.drop_field_if_empty(_col2, _nt2, "答案", _info2) is True)
+eq("P224 重试了一次（共调用两次）", _models2.calls, 2)
+eq("P225 报告里记的是 removed-after-retry", _info2.get("reason"), "removed-after-retry")
+ok(
+    "P226 报告里有删除前后的字段表",
+    bool(_info2.get("fields_before")) and "答案" not in _info2.get("fields_after", []),
+    _info2,
+)
+ok("P227 字段真的没了", "答案" not in [f["name"] for f in _nt2["flds"]])
+
+# 有内容的字段不删（宁可不删）
+_nt3 = {"name": mod.TF_NOTE_TYPE_NAME, "flds": [{"name": n} for n in ["题目", "答案", "解析"]]}
+_col3 = FakeTfCol([FakeTfNote(701, "题干", "对")], _nt3)
+_info3: dict = {}
+ok("P228 有内容的字段不删", mod.drop_field_if_empty(_col3, _nt3, "答案", _info3) is False)
+eq("P229 报告里说清了原因", _info3.get("reason"), "has-content")
+eq("P230 报告里记了有内容的条数", _info3.get("nonempty_notes"), 1)
+
+# 两次都失败：记下异常原文
+_nt4 = {"name": mod.TF_NOTE_TYPE_NAME, "flds": [{"name": n} for n in ["题目", "答案", "解析"]]}
+_models4 = RetryTfModels(_nt4, fail_times=99)
+_col4 = AnswerFieldCol([FakeTfNote(801, "题干", "")], _nt4, _models4)
+_info4: dict = {}
+ok("P231 两次都失败会返回失败", mod.drop_field_if_empty(_col4, _nt4, "答案", _info4) is False)
+eq("P232 报告里带异常原文", _info4.get("reason"), "error")
+ok("P233 异常原文里有信息", "field is protected" in str(_info4.get("error")), _info4.get("error"))
+
+
+# 直接读笔记判断空不空（不依赖搜索）
+class NoSearchCol(FakeTfCol):
+    def find_notes(self, query):
+        if ":_*" in query:
+            raise RuntimeError("搜索语法不支持")
+        return [n.id for n in self.notes]
+
+
+_nt5 = {"name": mod.TF_NOTE_TYPE_NAME, "flds": [{"name": n} for n in ["题目", "答案", "解析"]]}
+_col5 = NoSearchCol([FakeTfNote(901, "题干", "")], _nt5)
+eq("P234 搜索用不了也照样能判定为空", mod._field_nonempty_notes(_col5, _nt5, "答案"), 0)
+ok("P235 空字段判定通过", mod._field_has_values(_col5, _nt5, "答案") is False)
+_col6 = NoSearchCol([FakeTfNote(902, "题干", "对")], _nt5)
+ok("P236 有内容时判定为有", mod._field_has_values(_col6, _nt5, "答案") is True)
+eq("P237 没有笔记的题型直接是 0", mod._field_nonempty_notes(NoSearchCol([], _nt5), _nt5, "答案"), 0)
+eq("P238 字段不存在也是 0", mod._field_nonempty_notes(_col6, _nt5, "不存在的字段"), 0)
+
+# 报告文件
+_report = {"version": mod.__version__, "ts": 1, "types": {"x": {"has_answer": False}}}
+mod._write_migration_report(_report)
+_read = json.loads(mod.MIGRATION_REPORT_PATH.read_text(encoding="utf-8"))
+eq("P239 报告能写能读", _read, _report)
+try:
+    mod.MIGRATION_REPORT_PATH.unlink()
+except Exception:
+    pass
+
 # ------------------------------------------------------------------ 从 GitHub 检查更新
 ok("P128 版本号能解析", mod._version_tuple("1.2.3") == (1, 2, 3))
 ok("P129 认不出的版本号当 0", mod._version_tuple("") == (0,))
@@ -942,6 +1230,12 @@ ok("P132 旧版本不算新", mod.is_newer("0.9.9", "1.0.0") is False)
 ok("P133 2.0 比 1.9 新", mod.is_newer("2.0", "1.9.9") is True)
 ok("P134 本地版本号存在", isinstance(mod.__version__, str) and mod.__version__)
 ok("P135 默认开启启动检查", mod.DEFAULTS.get("update_check") is True)
+# 1.1.6 踩过：改了 version.txt / manifest / 分发包，却忘了 __init__.py 里的 __version__，
+# 结果插件自更新会一直以为自己是旧版。这条断言把它钉住。
+_version_txt = open(
+    os.path.join(ADDON_DIR, os.pardir, "version.txt"), encoding="utf-8"
+).read().strip()
+eq("P253 插件里的版本号和 version.txt 一致", mod.__version__, _version_txt)
 
 _saved_repo = mod.UPDATE_REPO
 mod.UPDATE_REPO = "TODO/anki-interactive-quiz"
