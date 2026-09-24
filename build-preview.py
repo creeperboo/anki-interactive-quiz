@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成 答题反馈预览-1.1.6.html（就在本脚本旁边）。
+"""生成 答题反馈预览-1.1.7.html（就在本脚本旁边）。
 
 把真实的 assets/quiz.js + assets/quiz.css 塞进几个 iframe（每个 iframe 就是一张真卡片的
 DOM 结构），再让每个 iframe 自己跑一小段「演示脚本」把卡片点到答完的状态，这样在浏览器里
@@ -15,7 +15,7 @@ from pathlib import Path
 # 脚本自己所在目录 = 项目根目录（这样整个文件夹搬到哪都能跑）
 HERE = Path(__file__).resolve().parent
 SRC = HERE / "源码"
-OUT = HERE / "答题反馈预览-1.1.6.html"
+OUT = HERE / "答题反馈预览-1.1.7.html"
 
 CSS = (SRC / "assets" / "quiz.css").read_text(encoding="utf-8")
 JS = (SRC / "assets" / "quiz.js").read_text(encoding="utf-8")
@@ -171,7 +171,7 @@ PAGE = """<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>互动答题卡 1.1.6 · 答完效果预览</title>
+<title>互动答题卡 1.1.7 · 答完效果预览</title>
 <style>
   :root { color-scheme: light; }
   body {
@@ -192,7 +192,7 @@ PAGE = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>互动答题卡 1.1.6 · 答完效果预览</h1>
+<h1>互动答题卡 1.1.7 · 答完效果预览</h1>
 <p class="lead">这一页用的是插件里那份真实的 <code>quiz.js</code> / <code>quiz.css</code>，每格是一张真卡片
 （iframe 里自动帮你点成「已答完」的样子）。<b>选择题 / 判断题只看颜色，填空题把标准答案写进空里。</b></p>
 <div class="grid" id="grid"></div>

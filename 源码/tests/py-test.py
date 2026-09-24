@@ -1359,6 +1359,84 @@ ok("P144 提示里有 Release 链接", "/releases/tag/v9.9.9" in _prompt, _promp
 ok("P145 提示里问要不要装", "现在下载并安装吗" in _prompt, _prompt)
 mod.UPDATE_REPO = _saved_repo
 
+# ------------------------------------------------------------------ 1.1.7：装好了但没重启
+# 「更新后检查更新仍显示旧版本」的根因：文件换新了、Anki 还没重启，跑着的还是旧代码。
+# 现在检查更新会读磁盘上那份的版本号，这种情况直接提示重启，不再催下载。
+eq("P255 磁盘上的版本就是当前文件里的版本", mod.disk_version(), _version_txt)
+ok(
+    "P256 磁盘读不到版本时不炸",
+    isinstance(mod.disk_version(), str),
+)
+
+_saved_version = mod.__version__
+_saved_disk = mod.disk_version
+_saved_latest = mod.fetch_latest_version
+_saved_ask = mod.askUser
+_saved_download = mod.download_and_install_update
+
+mod.UPDATE_REPO = "someone/some-repo"
+mod._repo_ready_orig = None
+
+_ask_calls = []
+_download_calls = []
+mod.askUser = lambda *a, **k: (_ask_calls.append(a), True)[1]
+mod.download_and_install_update = lambda: (_download_calls.append(1), True)[1]
+
+
+def _tips():
+    return [m[1][0] for m in utils.messages if m[0] == "tip"]
+
+
+# 跑的是 1.1.5、磁盘上已经是 1.1.6、线上也是 1.1.6 → 只提示重启
+mod.__version__ = "1.1.5"
+mod.disk_version = lambda: "1.1.6"
+mod.fetch_latest_version = lambda: "1.1.6"
+utils.messages.clear()
+_ask_calls.clear()
+_download_calls.clear()
+mod.check_for_update()
+ok(
+    "P257 装好没重启 → 提示重启而不是让你再下一次",
+    any("已经装好了，重启 Anki 后生效" in t and "1.1.6" in t for t in _tips()),
+    _tips(),
+)
+eq("P258 这种情况不弹下载询问", len(_ask_calls), 0)
+eq("P259 也不会真的去下载", len(_download_calls), 0)
+_state = mod._update_state()
+eq(
+    "P260 更新状态里记了运行 / 磁盘 / 线上三个版本",
+    (_state.get("running"), _state.get("on_disk"), _state.get("latest")),
+    ("1.1.5", "1.1.6", "1.1.6"),
+)
+
+# 都最新 → 老文案
+mod.__version__ = "1.1.6"
+mod.disk_version = lambda: "1.1.6"
+mod.fetch_latest_version = lambda: "1.1.6"
+utils.messages.clear()
+mod.check_for_update()
+ok("P261 都最新还是「已经是最新版本」", any("已经是最新版本（1.1.6）" in t for t in _tips()), _tips())
+
+# 真的该更新 → 走下载流程，装完记下 installed 并提示重启
+mod.__version__ = "1.1.5"
+mod.disk_version = lambda: "1.1.5"
+mod.fetch_latest_version = lambda: "1.1.7"
+utils.messages.clear()
+_ask_calls.clear()
+_download_calls.clear()
+mod.check_for_update()
+eq("P262 真该更新时会问一句", len(_ask_calls), 1)
+eq("P263 问了才下载", len(_download_calls), 1)
+ok("P264 装完提示重启", any("已更新到 1.1.7" in t for t in _tips()), _tips())
+eq("P265 装完把已装版本记下来", mod._update_state().get("installed"), "1.1.7")
+
+mod.__version__ = _saved_version
+mod.disk_version = _saved_disk
+mod.fetch_latest_version = _saved_latest
+mod.askUser = _saved_ask
+mod.download_and_install_update = _saved_download
+mod.UPDATE_REPO = _saved_repo
+
 print("\n".join(results))
 print("----")
 print(

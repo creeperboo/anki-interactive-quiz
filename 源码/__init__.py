@@ -38,7 +38,7 @@ MIGRATION_REPORT_PATH = USER_FILES_DIR / "migration.json"
 # 版本 & 从 GitHub 检查更新
 # --------------------------------------------------------------------------
 
-__version__ = "1.1.6"
+__version__ = "1.1.7"
 
 # 更新检查从这里拉：https://github.com/creeperboo/anki-interactive-quiz
 UPDATE_REPO = "creeperboo/anki-interactive-quiz"
@@ -2671,6 +2671,28 @@ def update_prompt_text(latest: str) -> str:
     return text + "\n\n现在下载并安装吗？装完要重启 Anki 才生效。"
 
 
+def disk_version() -> str:
+    """磁盘上这份插件现在装的是哪一版（直接读文件里的 __version__，不导入）。
+
+    运行中的代码是启动那一刻载入内存的：用户「装好了但还没重启」时，磁盘上的版本会比
+    运行中的新。检查更新要靠它分辨这种情况，别再催着下载。
+    """
+    try:
+        text = (Path(__file__).resolve().parent / "__init__.py").read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    match = re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", text, re.M)
+    return match.group(1).strip() if match else ""
+
+
+def update_pending_restart_text(version: str) -> str:
+    """新版已经装到磁盘、但还没重启时的提示（抽出来方便测试）。"""
+    return (
+        f"互动答题卡：新版 {version} 已经装好了，重启 Anki 后生效"
+        f"（当前运行中的还是 {__version__}）"
+    )
+
+
 def _update_state() -> dict[str, Any]:
     try:
         data = json.loads(UPDATE_STATE_PATH.read_text(encoding="utf-8"))
@@ -2748,15 +2770,28 @@ def check_for_update(silent: bool = False) -> None:
             return
         state = _update_state()
         state["checked_at"] = int(time.time())
+        # 诊断信息：线上版本 / 运行中的版本 / 磁盘上的版本，出问题可以直接看这个文件
+        state["latest"] = latest or ""
+        state["running"] = __version__
+        on_disk = disk_version()
+        state["on_disk"] = on_disk
         _save_update_state(state)
         if not latest or not is_newer(latest, __version__):
             if not silent:
                 tooltip(f"互动答题卡：已经是最新版本（{__version__}）")
             return
+        # 「装好了但还没重启」：磁盘上那份已经不比线上旧（或上次就是装的这一版）→ 只提醒重启
+        disk_is_current = bool(on_disk) and not is_newer(latest, on_disk)
+        if disk_is_current or state.get("installed") == latest:
+            tooltip(update_pending_restart_text(on_disk or latest))
+            return
         if not askUser(update_prompt_text(latest)):
             return
         try:
             if download_and_install_update():
+                state = _update_state()
+                state["installed"] = latest
+                _save_update_state(state)
                 tooltip(f"互动答题卡：已更新到 {latest}，请重启 Anki")
         except Exception as exc:
             showInfo(f"互动答题卡：下载更新失败\n{exc}")

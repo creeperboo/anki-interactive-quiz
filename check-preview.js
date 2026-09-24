@@ -1,12 +1,12 @@
 /* 端到端核对预览页里那 7 张卡：用 dom-test.js 的伪 DOM 跑真实的 quiz.js，
    再执行预览页给每张卡配的「演示动作」，把结果打出来看看是不是想要的状态。
    用法：node check-preview.js [预览 HTML 路径] [源码目录]
-         （不写参数就用本脚本旁边的 答题反馈预览-1.1.6.html 和 源码\） */
+         （不写参数就用本脚本旁边的 答题反馈预览-1.1.7.html 和 源码\） */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-const htmlPath = process.argv[2] || path.join(__dirname, "答题反馈预览-1.1.6.html");
+const htmlPath = process.argv[2] || path.join(__dirname, "答题反馈预览-1.1.7.html");
 const srcRoot = process.argv[3] || path.join(__dirname, "源码");
 
 const html = fs.readFileSync(htmlPath, "utf8");
