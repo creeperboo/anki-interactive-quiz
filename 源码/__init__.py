@@ -38,7 +38,7 @@ MIGRATION_REPORT_PATH = USER_FILES_DIR / "migration.json"
 # 版本 & 从 GitHub 检查更新
 # --------------------------------------------------------------------------
 
-__version__ = "1.1.7"
+__version__ = "1.1.11"
 
 # 更新检查从这里拉：https://github.com/creeperboo/anki-interactive-quiz
 UPDATE_REPO = "creeperboo/anki-interactive-quiz"
@@ -192,6 +192,35 @@ def _read_asset(name: str) -> str:
 _HTML_BLOCKS = "div|p|li|tr|h[1-6]|section|article|blockquote|pre|ul|ol|table|dd|dt|br"
 
 
+def _html_unescape(text: Any) -> str:
+    """把字段里常见的实体还原成真字符。"""
+    s = str(text if text is not None else "")
+    return (
+        s.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+    )
+
+
+def _html_inline_text(text: Any) -> str:
+    """一行 HTML 里的可见文字（去标签、解实体），给锚文字这类单行文本用。"""
+    return _html_unescape(re.sub(r"<[^>]*>", "", str(text if text is not None else ""))).strip()
+
+
+def _html_lines(raw: Any) -> list[str]:
+    """把字段 HTML 按行切开，但把 <a href="…"> 留在行里（知识点要取 href）。"""
+    s = str(raw if raw is not None else "")
+    s = re.sub(r"<script[\s\S]*?</script\s*>", "", s, flags=re.I)
+    s = re.sub(r"<style[\s\S]*?</style\s*>", "", s, flags=re.I)
+    s = re.sub(r"<\s*br\s*/?\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"<\s*/\s*(%s)\s*>" % _HTML_BLOCKS, "\n", s, flags=re.I)
+    s = re.sub(r"<\s*(%s)\b[^>]*>" % _HTML_BLOCKS, "\n", s, flags=re.I)
+    return s.splitlines()
+
+
 def _html_to_text(text: Any) -> str:
     """把字段内容（HTML）变成按行纯文本，跟卡片端 htmlToText 一套规则。"""
     s = str(text if text is not None else "")
@@ -201,15 +230,7 @@ def _html_to_text(text: Any) -> str:
     s = re.sub(r"<\s*/\s*(%s)\s*>" % _HTML_BLOCKS, "\n", s, flags=re.I)
     s = re.sub(r"<\s*(%s)\b[^>]*>" % _HTML_BLOCKS, "\n", s, flags=re.I)
     s = re.sub(r"<[^>]*>", "", s)
-    s = (
-        s.replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
-    )
-    return s
+    return _html_unescape(s)
 
 
 # 字段名 -> 隐藏区里的 id，卡片端脚本按这些 id 读原始内容
@@ -616,6 +637,94 @@ def heal_tf_markers() -> int:
     return fixed
 
 
+def default_tf_flags() -> int:
+    """没标记、账本里也没记过的判断题：按界面里「不勾 = 错」补成「错」（幂等）。
+
+    只动题目非空的卡；题目空着的（还在写）不碰，免得平白多出一张空题卡。
+    """
+    col = getattr(mw, "col", None)
+    models = getattr(col, "models", None) if col is not None else None
+    if col is None or models is None:
+        return 0
+    nt = models.by_name(TF_NOTE_TYPE_NAME)
+    if nt is None:
+        return 0
+    names = [f["name"] for f in nt.get("flds", [])]
+    if "题目" not in names:
+        return 0
+    index_q = names.index("题目")
+    flags = load_tf_flags()
+    filled = 0
+    try:
+        nids = col.find_notes('note:"%s"' % TF_NOTE_TYPE_NAME)
+    except Exception as exc:
+        print(f"[互动答题卡] 取判断题失败: {exc}")
+        return 0
+    for nid in nids:
+        if flags.get(str(nid)):
+            continue
+        try:
+            note = col.get_note(nid)
+            question = note.fields[index_q]
+            if tf_marker_flag(question):
+                continue
+            if not _html_to_text(question).strip():
+                continue
+            note.fields[index_q] = with_tf_marker(question, "错")
+            update_note(col, note)
+            remember_tf_flag(nid, "错")
+            filled += 1
+        except Exception as exc:
+            print(f"[互动答题卡] 给判断题 {nid} 补默认真值失败: {exc}")
+            continue
+    if filled:
+        print(f"[互动答题卡] 已给 {filled} 张判断题补上默认真值「错」")
+    return filled
+
+
+def on_add_cards_did_add_note(note: Any) -> None:
+    """新卡保存后：判断题「只填了题目、没勾选框」的，补上默认真值「错」。
+
+    这是 1.1.11 新增的第三层保险（另外两层：打开编辑器时补、启动体检补）。
+    起因是从「添加卡片」窗口新建判断题、只填题目不点勾选时，题目里永远不会
+    出现 <!--iq-tf:错-->，卡片端就认不出题型。整段兜在 try/except 里，
+    出错也绝不影响加卡；幂等，已有标记、题目空着、非判断题都不碰。
+    """
+    try:
+        _default_tf_marker_on_add(note)
+    except Exception as exc:
+        print(f"[互动答题卡] 新卡补判断题真值失败: {exc}")
+
+
+def _default_tf_marker_on_add(note: Any) -> None:
+    col = getattr(mw, "col", None)
+    if col is None or note is None:
+        return
+    try:
+        model = note.model()
+    except Exception:
+        return
+    if not isinstance(model, dict) or model.get("name") != TF_NOTE_TYPE_NAME:
+        return
+    names = [f.get("name") for f in model.get("flds") or []]
+    if "题目" not in names:
+        return
+    index = names.index("题目")
+    try:
+        question = str(note.fields[index])
+    except Exception:
+        return
+    if tf_marker_flag(question):
+        return
+    if not _html_to_text(question).strip():
+        # 题目还空着：不凭空造一张空题卡
+        return
+    note.fields[index] = with_tf_marker(question, "错")
+    update_note(col, note)
+    remember_tf_flag(getattr(note, "id", 0), "错")
+    print(f"[互动答题卡] 新卡 {getattr(note, 'id', '?')} 是判断题，已补上默认真值「错」")
+
+
 def _migration_types_report(col: Any) -> dict[str, Any]:
     """每个题型的最终字段表 + 「答案」是不是真的没了（给报告用）。"""
     models = getattr(col, "models", None) if col is not None else None
@@ -666,7 +775,7 @@ def clean_answer_fields(report: Optional[dict[str, Any]] = None) -> list[str]:
     return removed
 
 
-def migrate_answer_fields() -> None:
+def migrate_answer_fields() -> dict[str, Any]:
     """1.1.3 起的字段整理：判断题真值搬进题目标记，再把空的「答案」字段删干净。
 
     过程写进 user_files/migration.json，方便事后核对（沙箱里也能读）。
@@ -689,6 +798,12 @@ def migrate_answer_fields() -> None:
         report["tf_heal_error"] = f"{type(exc).__name__}: {exc}"
         print(f"[互动答题卡] 补判断题标记失败: {exc}")
     try:
+        # 1.1.10：没标记也没账本的判断题，按「不勾 = 错」补上明确真值
+        report["tf_defaulted"] = default_tf_flags()
+    except Exception as exc:
+        report["tf_default_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[互动答题卡] 补判断题默认真值失败: {exc}")
+    try:
         report["answer_removed_types"] = clean_answer_fields(report)
     except Exception as exc:
         report["clean_error"] = f"{type(exc).__name__}: {exc}"
@@ -703,6 +818,7 @@ def migrate_answer_fields() -> None:
         name for name, entry in report["types"].items() if entry.get("has_answer")
     ]
     _write_migration_report(report)
+    return report
 
 
 _SAMPLE_TAG = "互动答题卡示例"
@@ -1326,9 +1442,18 @@ def _bottom_webview(reviewer: Any) -> Any:
 
 
 def _grade(reviewer: Any, card_id: Optional[int], ease: int) -> None:
-    """真正给卡片打分。优先用 Anki 自己的入口，失败则退回点击底部评分按钮。"""
+    """真正给卡片打分。
 
-    def run() -> None:
+    26.9.x 的 ``Reviewer._answerCard`` 开头就是 ``if self.state != "answer": return``，
+    而答题时 reviewer 还停在题目面（``state == "question"``）——所以直接调它等于什么都没发生：
+    卡片卡在原地、revlog 里也不留痕，用户只好自己再点一次 Anki 的「显示答案」。
+
+    这里的做法：先把 state 临时切成 "answer"，让 Anki 收下这次评级（界面不翻页，直接进下一张）。
+    万一将来这条路失效（state 变只读、Anki 换了流程），再退回「先 ``_showAnswer()`` 翻到答案面、
+    再评级」，最后才是点底部的评分按钮。
+    """
+
+    def run(retry: bool = False, before_card: Any = None, before_marker: Any = None) -> None:
         current = getattr(mw, "reviewer", None)
         if current is None:
             return
@@ -1336,22 +1461,144 @@ def _grade(reviewer: Any, card_id: Optional[int], ease: int) -> None:
         if card is None or (card_id is not None and card.id != card_id):
             return
         answer = getattr(current, "_answerCard", None)
-        if callable(answer):
+        if not callable(answer):
+            if not _grade_via_bottom_bar(current, ease):
+                print(f"[互动答题卡] 无法评级：找不到可用的评分入口（ease={ease}）")
+            return
+
+        if retry:
+            # 静默那条路没看到进展。真正的作答是丢到后台跑的，可能只是慢了一拍，
+            # 再确认一次；确认真没记上才回退（回退要翻到答案面，能不错就不错）
+            if _grade_card_moved(current, before_card, before_marker):
+                return
+            if _grade_via_show_answer(current, answer, ease):
+                return
+            if not _grade_via_bottom_bar(current, ease):
+                print(f"[互动答题卡] 无法评级：找不到可用的评分入口（ease={ease}）")
+            return
+
+        state = getattr(current, "state", None)
+        if state == "transition":
+            return  # 上一张卡正在切走，别再插一脚
+        if state == "answer":
+            # 用户自己点过 Anki 的「显示答案」，维持原来的做法
             try:
                 answer(ease)
-                return
             except Exception as exc:
                 print(f"[互动答题卡] _answerCard 失败: {exc}")
-        web = _bottom_webview(current)
-        if web is not None:
-            try:
-                web.eval(f"pycmd('ease{ease}')")
-                return
-            except Exception as exc:
-                print(f"[互动答题卡] 底部按钮回退失败: {exc}")
-        print(f"[互动答题卡] 无法评级：找不到可用的评分入口（ease={ease}）")
+                _grade_via_bottom_bar(current, ease)
+            return
+
+        before_card = getattr(card, "id", None)
+        before_marker = _revlog_marker()
+        if _grade_via_silent_answer(current, answer, ease, before_card, before_marker):
+            return
+        QTimer.singleShot(0, lambda: run(True, before_card, before_marker))
 
     QTimer.singleShot(0, run)
+
+
+def _revlog_marker() -> Any:
+    """revlog 里最新一行的 id：判断刚才那次评级到底有没有真记上。
+
+    26.9.x 把真正的作答丢到后台线程执行，所以这个信号可能来得慢一点；
+    读不到（没有 col / 没有这个接口）就返回 None，调用方改用别的信号。
+    """
+
+    db = getattr(getattr(mw, "col", None), "db", None)
+    if db is None:
+        return None
+    try:
+        return db.scalar("select max(id) from revlog")
+    except Exception:
+        return None
+
+
+def _grade_progressed(reviewer: Any, forced_state: bool, before_card: Any, before_marker: Any) -> bool:
+    """刚才那一下有没有真的记上：状态的往前走、卡片换了、revlog 多了新行，有一个就算。"""
+
+    if forced_state and getattr(reviewer, "state", None) != "answer":
+        return True  # 26.9.x 实测：收下之后同步变成 transition
+    return _grade_card_moved(reviewer, before_card, before_marker)
+
+
+def _grade_card_moved(reviewer: Any, before_card: Any, before_marker: Any) -> bool:
+    """只看「卡片换了 / revlog 多了新行」这两个信号（临时改过 state，状态那条不能用）。"""
+
+    after_card = getattr(getattr(reviewer, "card", None), "id", None)
+    if before_card is not None and after_card != before_card:
+        return True
+    if before_marker is not None:
+        after_marker = _revlog_marker()
+        if after_marker is not None and after_marker != before_marker:
+            return True
+    return False
+
+
+def _grade_via_silent_answer(
+    reviewer: Any, answer: Any, ease: int, before_card: Any, before_marker: Any
+) -> bool:
+    """不翻页记分：把 reviewer 的 state 临时冒充成 answer，Anki 才肯收下这次评级。
+
+    返回 True = 记上了（Anki 正在切下一张卡）；False = 没记上，需要换办法。
+    """
+
+    original_state = getattr(reviewer, "state", None)
+    forced = original_state is not None
+    if forced:
+        try:
+            reviewer.state = "answer"
+        except Exception as exc:
+            print(f"[互动答题卡] 无法切换 reviewer 状态: {exc}")
+            return False
+    try:
+        answer(ease)
+    except Exception as exc:
+        print(f"[互动答题卡] _answerCard 失败: {exc}")
+    if _grade_progressed(reviewer, forced, before_card, before_marker):
+        return True
+    if forced and getattr(reviewer, "state", None) == "answer":
+        try:
+            reviewer.state = original_state  # 还回题目面，好让回退路线能用
+        except Exception as exc:
+            print(f"[互动答题卡] 还原 reviewer 状态失败: {exc}")
+    return False
+
+
+def _grade_via_show_answer(reviewer: Any, answer: Any, ease: int) -> bool:
+    """回退路线：先让 Anki 自己翻到答案面，再评级（26.9.3 真机验证过这条路能记上）。"""
+
+    show = getattr(reviewer, "_showAnswer", None)
+    if not callable(show):
+        return False
+    try:
+        show()
+    except Exception as exc:
+        print(f"[互动答题卡] _showAnswer 失败: {exc}")
+        return False
+    state = getattr(reviewer, "state", None)
+    if state is not None and state != "answer":
+        return False  # 没翻过去，别硬评，交给底部按钮
+    try:
+        answer(ease)
+        return True
+    except Exception as exc:
+        print(f"[互动答题卡] _answerCard 失败: {exc}")
+        return False
+
+
+def _grade_via_bottom_bar(reviewer: Any, ease: int) -> bool:
+    """最后的兜底：点 Anki 底部的评分按钮。"""
+
+    web = _bottom_webview(reviewer)
+    if web is None:
+        return False
+    try:
+        web.eval(f"pycmd('ease{ease}')")
+        return True
+    except Exception as exc:
+        print(f"[互动答题卡] 底部按钮回退失败: {exc}")
+        return False
 
 
 def _parse_result(parts: list[str]) -> dict[str, Any]:
@@ -1952,6 +2199,78 @@ def _editor_field_values(editor: Any) -> list[str]:
 # --------------------------------------------------------------------------
 
 _LINK_SCHEME_RE = re.compile(r"^(https?|mailto|file|ftp):", re.I)
+# 「像网址吗」的域名字形：点号分段，末段至少两位字母数字。
+# 要求这个形状是为了不把「国际法.渊源」这种中文文本当成网址。
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+(:\d+)?([/?#].*)?$")
+_HOST_LAST_RE = re.compile(r"^[A-Za-z0-9]+$")
+_A_TAG_RE = re.compile(r"<a\b([^>]*)>([\s\S]*?)</a\s*>", re.I)
+_HREF_RE = re.compile(r"""href\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))""", re.I)
+
+
+def normalize_target(value: Any) -> str:
+    """把目标规整一下：去前后空白（含全角空格），全角冒号只在协议位置归一半角。"""
+    t = str(value if value is not None else "").replace("\u3000", " ")
+    t = re.sub(r"^[\s\u00a0]+|[\s\u00a0]+$", "", t)
+    match = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*)：", t)
+    if match:
+        t = "%s:%s" % (match.group(1), t[match.end():])
+    return t
+
+
+def is_web_target(target: Any) -> bool:
+    """像网址吗？卡片端 isWebTarget 跟这里必须是一套规则。"""
+    t = normalize_target(target)
+    if not t:
+        return False
+    low = t.lower()
+    if _LINK_SCHEME_RE.match(low):
+        return True
+    if t.startswith("//"):
+        return True
+    if low.startswith("www."):
+        return True
+    if re.search(r"[\s\u3000]", t):
+        return False
+    if not _DOMAIN_RE.match(t):
+        return False
+    host = re.split(r"[/?#]", t, 1)[0].split(":")[0]
+    last = host.rsplit(".", 1)[-1]
+    return len(last) >= 2 and bool(_HOST_LAST_RE.match(last))
+
+
+def web_url(target: Any) -> str:
+    """把网址补成能打开的样子：www.x.com -> https://www.x.com。"""
+    t = normalize_target(target)
+    low = t.lower()
+    if _LINK_SCHEME_RE.match(low):
+        return t
+    if t.startswith("//"):
+        return "https:" + t
+    return "https://" + t
+
+
+def _href_of(attrs: Any) -> str:
+    """从 <a> 的属性串里取 href（带引号 / 不带引号都认）。"""
+    match = _HREF_RE.search(str(attrs or ""))
+    if not match:
+        return ""
+    raw = match.group(2)
+    if raw is None:
+        raw = match.group(3)
+    if raw is None:
+        raw = match.group(4)
+    return _html_unescape(raw or "").strip()
+
+
+def _split_embedded_target(text: str) -> Optional[tuple[str, str]]:
+    """一行里夹着一个网址（「唐诗 https://…」或「<https://…>」）：前半当标签。"""
+    parts = re.split(r"[\s\u3000]+", text)
+    for index, part in enumerate(parts):
+        token = part.strip("<>「」《》")
+        if token and token != text and is_web_target(token):
+            label = " ".join(parts[:index]).strip()
+            return (label or token, token)
+    return None
 
 
 def parse_knowledge_line(line: Any) -> tuple[str, str]:
@@ -1973,10 +2292,34 @@ def parse_knowledge_line(line: Any) -> tuple[str, str]:
     if cut > 0:
         label = first[:cut].strip()
         target = first[cut + width :].strip()
-    if not target:
+        if target:
+            return label or target, target
         label = first
         target = first
+    embedded = _split_embedded_target(first)
+    if embedded:
+        return embedded
     return label or target, target
+
+
+def parse_knowledge_line_html(line: Any) -> tuple[str, str]:
+    """一行 HTML：优先认 <a href="…">锚文字</a>，没有就退回纯文字写法。
+
+    从浏览器复制链接粘进 Anki，字段里存的是富文本 <a href>，锚文字常常不是网址
+    （或者干脆是空的），所以取 href 当跳转目标、锚文字当标签。
+    """
+    text = str(line if line is not None else "")
+    for match in _A_TAG_RE.finditer(text):
+        href = _href_of(match.group(1))
+        if not href:
+            continue
+        label = _html_inline_text(match.group(2))
+        return (label or href), href
+    label, target = parse_knowledge_line(_html_unescape(re.sub(r"<[^>]*>", "", text)))
+    if target:
+        return label, target
+    # 整行就是 <某个网址>（被尖括号包着）时，上面那次去标签会把整行吃空，这里再认一次
+    return parse_knowledge_line(_html_unescape(text))
 
 
 def parse_knowledge(raw: Any) -> list[tuple[str, str]]:
@@ -1988,8 +2331,8 @@ def parse_knowledge(raw: Any) -> list[tuple[str, str]]:
     """
     items: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for line in _html_to_text(raw).splitlines():
-        label, target = parse_knowledge_line(line)
+    for line in _html_lines(raw):
+        label, target = parse_knowledge_line_html(line)
         if not target or label in seen:
             continue
         seen.add(label)
@@ -1999,8 +2342,8 @@ def parse_knowledge(raw: Any) -> list[tuple[str, str]]:
 
 def knowledge_query(target: str) -> str:
     """把目标转成 Anki 搜索式；是网址就返回空串。"""
-    t = (target or "").strip()
-    if not t or _LINK_SCHEME_RE.match(t):
+    t = normalize_target(target)
+    if not t or is_web_target(t):
         return ""
     low = t.lower()
     if not low.startswith("anki:"):
@@ -2063,15 +2406,64 @@ def _open_browser_search(query: str) -> bool:
 
 def open_knowledge(target: str) -> bool:
     """按「知识点」的内容跳过去：网址开浏览器，其它当作 Anki 搜索式。"""
-    t = (target or "").strip()
+    t = normalize_target(target)
     if not t:
         return False
-    if _LINK_SCHEME_RE.match(t):
-        return _open_external_link(t)
+    if is_web_target(t):
+        return _open_external_link(web_url(t))
     query = knowledge_query(t)
     if not query:
         return False
     return _open_browser_search(query)
+
+
+def _clipboard_link() -> str:
+    """从系统剪贴板里取一个「像网址」的链接，取不到返回空串。
+
+    顺序跟编辑器那边的粘贴处理一致：① text/html 里第一个 <a href>
+    ② text/uri-list 的第一条 ③ text/plain（只有它本身就是网址才算）。
+    浏览器「复制链接」给的是锚文字，真网址藏在 text/html 的 href 里，所以
+    HTML 优先；纯文本那一档只认「自己就是网址」的，避免把普通文字当链接。
+    """
+    try:
+        from aqt.qt import QApplication  # type: ignore
+
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData() if clipboard is not None else None
+    except Exception as exc:
+        print(f"[互动答题卡] 读剪贴板失败: {exc}")
+        return ""
+    if mime is None:
+        return ""
+    try:
+        html = str(mime.html() or "")
+    except Exception:
+        html = ""
+    if html:
+        match = _A_TAG_RE.search(html)
+        if match:
+            href = normalize_target(_href_of(match.group(1)))
+            if href and is_web_target(href):
+                return href
+    try:
+        urls = mime.urls() or []
+    except Exception:
+        urls = []
+    for url in urls:
+        try:
+            text = url.toString() if hasattr(url, "toString") else str(url)
+        except Exception:
+            continue
+        text = normalize_target(text)
+        if text and is_web_target(text):
+            return text
+    try:
+        plain = normalize_target(mime.text() or "")
+    except Exception:
+        plain = ""
+    if plain and is_web_target(plain):
+        return plain
+    return ""
 
 
 def _field_index(note: Any, name: str) -> int:
@@ -2188,6 +2580,25 @@ def tip_key(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
 
 
+_BR_TAG_RE = re.compile(r"<\s*br\s*/?\s*>", re.I)
+_NBSP_ENTITY_RE = re.compile(r"&#0*160;|&#x0*a0;", re.I)
+
+
+def tip_html_signature(value: Any) -> str:
+    """技巧字段的「带格式签名」：只改格式（换行、空格、&nbsp;）也会被它看出来。
+
+    规则：各种写法的 <br> 归一成换行 → 实体解码（&nbsp;/&#160; 归成普通空格）→
+    连续空白（含换行）压成一个空格 → 去首尾。这样「加一个 <br>」「加一个空格」
+    「加一个 &nbsp;」都算改动，而编辑器自己的等价重写（<br> / <br/> / <br />）
+    不会误报。
+    """
+    s = str(value if value is not None else "")
+    s = _BR_TAG_RE.sub("\n", s)
+    s = _NBSP_ENTITY_RE.sub(" ", s)
+    s = _html_unescape(s).replace("\u00a0", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def gather_tips(editor: Any, page_tags: Optional[list[str]] = None) -> dict[str, Any]:
     """找「同标签的其他卡片」里的解题技巧，给编辑器里的按钮用。
 
@@ -2224,6 +2635,8 @@ def gather_tips(editor: Any, page_tags: Optional[list[str]] = None) -> dict[str,
         try:
             other = mw.col.get_note(nid)
             tip = _note_field_text(other, "解题技巧")
+            index = _field_index(other, "解题技巧")
+            tip_html = str(other.fields[index]) if index >= 0 else ""
         except Exception:
             continue
         if not tip:
@@ -2235,7 +2648,8 @@ def gather_tips(editor: Any, page_tags: Optional[list[str]] = None) -> dict[str,
         items.append(
             {
                 "nid": nid,
-                "tip": tip[:400],
+                "tip": tip,
+                "tip_html": tip_html or tip,
                 "tags": shared[:4],
             }
         )
@@ -2252,6 +2666,143 @@ def gather_tips(editor: Any, page_tags: Optional[list[str]] = None) -> dict[str,
     return {"tags": tags, "items": unique[:20], "total": len(unique)}
 
 
+def _note_type_ids_for(col: Any, names: tuple[str, ...]) -> list[int]:
+    """三个题型的 ntid（by_name 取，避开 notetypes 的 unicase 排序坑）。"""
+    models = getattr(col, "models", None)
+    out: list[int] = []
+    for name in names:
+        nt = models.by_name(name) if models is not None else None
+        if not isinstance(nt, dict):
+            continue
+        ntid = nt.get("id") or nt.get("mid")
+        try:
+            ntid = int(ntid)
+        except (TypeError, ValueError):
+            continue
+        if ntid > 0 and ntid not in out:
+            out.append(ntid)
+    return out
+
+
+def _note_ids_of_types(col: Any, ntids: list[int]) -> list[int]:
+    """按 note type id 直接从 notes 表取笔记 id（不走搜索语法）。"""
+    if not ntids:
+        return []
+    marks = ",".join("?" * len(ntids))
+    try:
+        rows = col.db.list("select id from notes where mid in (%s)" % marks, *ntids)
+    except Exception as exc:
+        print(f"[互动答题卡] 按题型取笔记失败: {exc}")
+        return []
+    out: list[int] = []
+    for row in rows or []:
+        try:
+            out.append(int(row[0] if isinstance(row, (list, tuple)) else row))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
+def find_tip_notes(col: Any, key: str, ntids: Optional[list[int]] = None) -> list[int]:
+    """全库三个题型里，「解题技巧」判重键等于 key 的笔记 id（按出现顺序）。"""
+    if not key:
+        return []
+    ids = ntids if ntids is not None else _note_type_ids_for(
+        col, (CHOICE_NOTE_TYPE_NAME, TF_NOTE_TYPE_NAME, CLOZE_NOTE_TYPE_NAME)
+    )
+    out: list[int] = []
+    for nid in _note_ids_of_types(col, ids):
+        try:
+            note = col.get_note(nid)
+        except Exception:
+            continue
+        if tip_key(_note_field_text(note, "解题技巧")) == key:
+            out.append(nid)
+    return out
+
+
+def sync_tips(editor: Any, base_raw: Any = None) -> dict[str, Any]:
+    """把本卡改过的「解题技巧」同步到全库用同一条技巧的卡（按去格式文字匹配）。
+
+    base_raw：打开这张笔记时的「解题技巧」原始内容（用户改之前的基准）。
+    """
+    try:
+        note = editor.note
+        names = [f["name"] for f in note.model()["flds"]]
+        fields = [str(value) for value in note.fields]
+        index = names.index("解题技巧")
+    except Exception as exc:
+        return {"ok": False, "reason": "no-field", "error": str(exc)}
+    new_html = fields[index]
+    new_text = _html_to_text(new_html).strip()
+    base_text = _html_to_text(base_raw).strip() if base_raw else ""
+    if not new_text:
+        return {"ok": False, "reason": "empty"}
+    if not base_text:
+        return {"ok": False, "reason": "no-base"}
+    key = tip_key(base_text)
+    # 只有「去格式文字一样」而且「带格式签名也一样」才算没改过：
+    # 只加了换行 / 空格 / &nbsp; 也算改动，要放行进同步流程。
+    if key == tip_key(new_text) and tip_html_signature(new_html) == tip_html_signature(base_raw):
+        return {"ok": False, "reason": "unchanged"}
+    col = getattr(mw, "col", None)
+    if col is None:
+        return {"ok": False, "reason": "no-col"}
+    try:
+        current_id = int(getattr(note, "id", 0) or 0)
+    except (TypeError, ValueError):
+        current_id = 0
+    others = [nid for nid in find_tip_notes(col, key) if nid != current_id]
+    total = len(others) + (1 if current_id > 0 else 0)
+    if not others:
+        return {"ok": False, "reason": "only-self", "total": total}
+    if not askUser("这条改动会同步到 %d 张卡片（含本卡），继续吗？" % total):
+        return {"ok": False, "reason": "declined", "total": total}
+    written = 0
+    for nid in others:
+        try:
+            other = col.get_note(nid)
+            other_index = _field_index(other, "解题技巧")
+            if other_index < 0:
+                continue
+            other.fields[other_index] = new_html
+            update_note(col, other)
+            written += 1
+        except Exception as exc:
+            print(f"[互动答题卡] 同步技巧到 {nid} 失败: {exc}")
+    return {"ok": True, "synced": written, "total": total, "tip_html": new_html}
+
+
+def _push_sync_result(editor: Any, payload: dict[str, Any]) -> None:
+    js = "window.__IQ_EDITOR__ && window.__IQ_EDITOR__.showSyncResult(%s);" % json.dumps(
+        payload, ensure_ascii=False
+    )
+    try:
+        editor.web.eval(js)
+    except Exception as exc:
+        print(f"[互动答题卡] 推送技巧同步结果失败: {exc}")
+
+
+def _request_sync_tips(editor: Any, base_raw: Any = None) -> None:
+    """先保存一次（把用户刚改的内容同步过来），再按基准同步出去。"""
+
+    def after_save() -> None:
+        try:
+            payload = sync_tips(editor, base_raw)
+        except Exception as exc:
+            payload = {"ok": False, "reason": "error", "error": str(exc)}
+        _push_sync_result(editor, payload)
+
+    save_now = getattr(editor, "saveNow", None)
+    if callable(save_now):
+        try:
+            save_now(after_save)
+            return
+        except Exception as exc:
+            print(f"[互动答题卡] 编辑器 saveNow 失败，仍然尝试同步技巧: {exc}")
+    after_save()
+
+
 def _push_tips(editor: Any, payload: dict[str, Any]) -> None:
     js = "window.__IQ_EDITOR__ && window.__IQ_EDITOR__.showTips(%s);" % json.dumps(
         payload, ensure_ascii=False
@@ -2260,6 +2811,19 @@ def _push_tips(editor: Any, payload: dict[str, Any]) -> None:
         editor.web.eval(js)
     except Exception as exc:
         print(f"[互动答题卡] 推送同标签技巧失败: {exc}")
+
+
+def _push_clipboard_result(editor: Any, index: int, url: str) -> None:
+    """把从剪贴板读到的链接推回编辑器面板那一行；url 为空表示没读到。"""
+    js = (
+        "window.__IQ_EDITOR__ && window.__IQ_EDITOR__.applyClipboard"
+        " && window.__IQ_EDITOR__.applyClipboard(%s, %d);"
+        % (json.dumps(url, ensure_ascii=False), int(index))
+    )
+    try:
+        editor.web.eval(js)
+    except Exception as exc:
+        print(f"[互动答题卡] 推送剪贴板链接失败: {exc}")
 
 
 def _request_tips(editor: Any, page_tags: Optional[list[str]] = None) -> None:
@@ -2392,6 +2956,18 @@ def _handle_editor_message(parts: list[str], editor: Any) -> Any:
                 print(f"[互动答题卡] 读编辑器标签失败: {exc}")
         _request_tips(editor, page_tags)
         return None
+    if action == "sync-tip":
+        # 「同步到同技巧卡片」：第 4 段是打开这张笔记时的「解题技巧」基准内容
+        base_raw = ""
+        if len(parts) > 3 and parts[3]:
+            from urllib.parse import unquote
+
+            try:
+                base_raw = unquote(parts[3])
+            except Exception:
+                base_raw = parts[3]
+        _request_sync_tips(editor, base_raw)
+        return None
     if action == "open":
         # 编辑器里「知识点」旁边的「试打开」
         if len(parts) > 3 and parts[3]:
@@ -2412,6 +2988,16 @@ def _handle_editor_message(parts: list[str], editor: Any) -> Any:
             except Exception:
                 flag = parts[3]
             _set_tf_flag_in_editor(editor, flag)
+        return None
+    if action == "clip":
+        # 「📋 从剪贴板读链接」：第 4 段是面板里那一行的序号
+        row_index = 0
+        if len(parts) > 3 and parts[3]:
+            try:
+                row_index = int(parts[3])
+            except (TypeError, ValueError):
+                row_index = 0
+        _push_clipboard_result(editor, row_index, _clipboard_link())
         return None
     if action != "set" or len(parts) < 4:
         return None
@@ -2497,7 +3083,11 @@ def on_editor_did_load_note(editor: Any) -> None:
 
 
 def _heal_tf_marker_in_editor(editor: Any) -> None:
-    """打开判断题时：题目里没有标记、但小账本记过的，先把标记补进去。"""
+    """打开判断题时把真值标记补明确：
+
+    已有标记 → 不动；没标记但小账本记过 → 补账本里的值；
+    既没标记也没记账 → 按界面里「不勾 = 错」补成「错」（题目还空着就等写完再说）。
+    """
     try:
         if _editor_mode(editor) != "tf":
             return
@@ -2506,12 +3096,13 @@ def _heal_tf_marker_in_editor(editor: Any) -> None:
         if "题目" not in names:
             return
         index = names.index("题目")
-        question = note.fields[index]
+        question = str(note.fields[index])
         if tf_marker_flag(question):
             return
-        flag = load_tf_flags().get(str(getattr(note, "id", "")))
-        if not flag:
+        if not _html_to_text(question).strip():
+            # 题目还空着：这时候补标记会造出一张空题卡，等用户写完再补
             return
+        flag = load_tf_flags().get(str(getattr(note, "id", ""))) or "错"
         fields = [str(value) for value in note.fields]
         fields[index] = with_tf_marker(question, flag)
         note.fields[index] = fields[index]
@@ -2520,6 +3111,7 @@ def _heal_tf_marker_in_editor(editor: Any) -> None:
             % (json.dumps(names, ensure_ascii=False), json.dumps(fields, ensure_ascii=False))
         )
         _push_editor_values(editor, fields)
+        remember_tf_flag(getattr(note, "id", 0), flag)
         print(f"[互动答题卡] 已给判断题 {getattr(note, 'id', '?')} 补回真值标记")
     except Exception as exc:
         print(f"[互动答题卡] 补判断题标记失败: {exc}")
@@ -2858,7 +3450,14 @@ def on_profile_did_open(profile: Any = None) -> None:
             except Exception as exc:
                 print(f"[互动答题卡] 创建{label}题型失败: {exc}")
         # 1.1.3：判断题的真值搬进题目标记，然后把「答案」字段删干净
-        migrate_answer_fields()
+        # 1.1.10：顺手给没设过真值的判断题补上默认「错」
+        try:
+            report = migrate_answer_fields()
+            filled = int((report or {}).get("tf_defaulted") or 0)
+            if filled:
+                tooltip("互动答题卡：已给 %d 张判断题补上默认真值「错」" % filled)
+        except Exception as exc:
+            print(f"[互动答题卡] 整理字段失败: {exc}")
         try:
             cleanup_legacy_note_type()
         except Exception as exc:
@@ -2897,3 +3496,5 @@ _add_hook("reviewer_did_answer_card", on_did_answer_card)
 _add_hook("reviewer_did_show_question", on_did_show_question)
 _add_hook("profile_did_open", on_profile_did_open)
 _add_hook("main_window_did_init", install_menu)
+# 1.1.11：从「添加卡片」窗口新建的判断题，保存后马上补默认真值「错」
+_add_hook("add_cards_did_add_note", on_add_cards_did_add_note)

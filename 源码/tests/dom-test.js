@@ -491,6 +491,12 @@ function cardHTML(f, side) {
       '<div id="iq-explanation"></div><div id="iq-tips"></div>' +
       '<div id="iq-knowledge"></div><div id="iq-source"></div>';
   }
+  /* 真实模板里只有判断题才多留一份 #iq-raw-question（题型要从它认出判断题），
+     这里跟着只在传了 questionRaw 时才输出，别的题型跟线上一样没有这个节点 */
+  var rawQuestion =
+    f.questionRaw === undefined
+      ? ""
+      : '<div id="iq-raw-question">' + f.questionRaw + "</div>";
   return (
     '<div class="iq-card" id="iq-card" data-side="' +
     side +
@@ -524,9 +530,7 @@ function cardHTML(f, side) {
     '<div id="iq-raw-type">' +
     (f.type || "") +
     "</div>" +
-    '<div id="iq-raw-question">' +
-    (f.questionRaw || "") +
-    "</div>" +
+    rawQuestion +
     '<div id="iq-raw-knowledge">' +
     (f.knowledge || "") +
     "</div>" +
@@ -775,9 +779,40 @@ var has = function (arr, s) {
 })();
 
 (function () {
-  /* 标记被人手删掉、又没同步过：当普通卡处理，别乱判 */
+  /* 1.1.11 兜底：题目里一个真值标记都没有（老卡 / 只填了题目没勾选）时，
+     按界面语义「不勾 = 错」当成「错」。判断题模板才多留一份 #iq-raw-question，
+     靠它认出这是判断题；题目非空才接管。 */
+  var r = run({ question: "地球是方的", questionRaw: "地球是方的" });
+  eq("E12 没标记也按「错」出两个按钮", r.opts().children.length, 2);
+  r.fire(r.opts().children[1], "click");
+  ok("E12b 点「错误」判对", verdict(r).indexOf("回答正确") >= 0, verdict(r));
+})();
+
+(function () {
+  var r = run({ question: "地球是方的", questionRaw: "地球是方的" });
+  r.fire(r.opts().children[0], "click");
+  ok("E12c 点「正确」判错（默认真值是错）", verdict(r).indexOf("回答错误") >= 0, verdict(r));
+  ok("E12d 答错时把该选的「错误」标绿", r.opts().children[1].classList.contains("iq-correct"));
+})();
+
+(function () {
+  /* 答案面同理：没标记也照「错」着色 */
+  var r = run({ question: "地球是方的", questionRaw: "地球是方的" }, { side: "back" });
+  var opts = r.opts();
+  eq("E12e 答案面也画两个选项", opts.children.length, 2);
+  ok("E12f 标绿的是「错误」", opts.children[1].classList.contains("iq-correct"));
+})();
+
+(function () {
+  /* 题目空着：不凭空造一张空题卡 */
+  var r = run({ question: "", questionRaw: "" });
+  eq("E12g 空题目不接管", r.opts().children.length, 0);
+})();
+
+(function () {
+  /* 页面上没有判断题那份隐藏副本（选择题 / 填空题模板）：绝不乱接管 */
   var r = run({ question: "地球是方的" });
-  eq("E12 没标记就不接管", r.opts().children.length, 0);
+  eq("E12h 没有判断题标记的普通卡不接管", r.opts().children.length, 0);
 })();
 
 (function () {
@@ -1396,6 +1431,54 @@ function answerFirst(r) {
   eq("V20 留的是第一条的链接", chips[0].getAttribute("href"), "https://a.example/1");
 })();
 
+/* V2. 1.1.11：子标签（父::子）字符串里存完整路径，卡片上只显示末级名 */
+(function () {
+  var r = run({
+    question: "Q",
+    options: "*A. \u7532<br>B. \u4e59",
+    knowledge:
+      "\u5211\u4e8b\u8bc9\u8bbc\u6cd5::\u5211\u4e8b\u8bc9\u8bbc\u6cd5\u6982\u8ff0 -> https://a.example/x\n" +
+      "\u6c11\u6cd5::\u603b\u8bba -> tag:\u603b\u8bba"
+  });
+  answerFirst(r);
+  var chips = r.feedback().querySelectorAll(".iq-know-btn");
+  eq("V21 两行两个标签", chips.length, 2);
+  ok(
+    "V22 网址那行只显示末级名",
+    chips[0].textContent.indexOf("\u5211\u4e8b\u8bc9\u8bbc\u6cd5\u6982\u8ff0") >= 0 &&
+      chips[0].textContent.indexOf("::") < 0,
+    chips[0].textContent
+  );
+  eq("V23 还是那个网址链接", chips[0].getAttribute("href"), "https://a.example/x");
+  r.fire(chips[0], "click");
+  eq(
+    "V24 点击仍跳完整目标",
+    r.calls[r.calls.length - 1],
+    "iq:open:" + encodeURIComponent("https://a.example/x")
+  );
+  eq("V25 搜索式那行也显示末级名", chips[1].textContent, "\u603b\u8bba");
+  r.fire(chips[1], "click");
+  eq(
+    "V26 搜索式带的仍是它自己的目标",
+    r.calls[r.calls.length - 1],
+    "iq:open:" + encodeURIComponent("tag:\u603b\u8bba")
+  );
+})();
+
+(function () {
+  /* 只写标签（没写跳转目标）时：显示末级名，搜的仍是完整路径 */
+  var r = run({ question: "Q", options: "*A. \u7532<br>B. \u4e59", knowledge: "\u6c11\u6cd5::\u603b\u8bba" });
+  answerFirst(r);
+  var chip = r.feedback().querySelector(".iq-know-btn");
+  eq("V27 只写标签时也显示末级名", chip.textContent, "\u603b\u8bba");
+  r.fire(chip, "click");
+  eq(
+    "V28 搜的是完整路径",
+    r.calls[r.calls.length - 1],
+    "iq:open:" + encodeURIComponent("\u6c11\u6cd5::\u603b\u8bba")
+  );
+})();
+
 /* W. 答案面不再列答案文字（1.1.5：靠颜色和空里的答案说话） */
 (function () {
   var r = run({ question: "Q", options: "*A. 甲<br>B. 乙" }, { side: "back" });
@@ -1425,6 +1508,89 @@ function answerFirst(r) {
     r.texts(r.question().querySelectorAll(".iq-blank-extra .iq-blank")),
     ["丙"]
   );
+})();
+
+/* X. 1.1.10：从浏览器粘过来的富文本链接、裸网址也要能跳（以前被当成搜索式） */
+(function () {
+  var r = run({
+    question: "Q",
+    options: "*A. 甲<br>B. 乙",
+    knowledge: '<a href="https://baike.baidu.com/item/tang">唐诗</a>'
+  });
+  answerFirst(r);
+  var chip = r.feedback().querySelector(".iq-know-btn");
+  ok("X1 富文本链接照样出标签", !!chip);
+  eq("X2 目标取的是 href", chip.getAttribute("href"), "https://baike.baidu.com/item/tang");
+  eq("X3 标签用锚文字", chip.textContent.indexOf("唐诗") >= 0, true);
+  r.fire(chip, "click");
+  eq(
+    "X4 点它交给插件开系统浏览器",
+    r.calls[r.calls.length - 1],
+    "iq:open:" + encodeURIComponent("https://baike.baidu.com/item/tang")
+  );
+})();
+
+(function () {
+  var r = run({ question: "Q", options: "*A. 甲<br>B. 乙", knowledge: "www.baidu.com" });
+  answerFirst(r);
+  var chip = r.feedback().querySelector(".iq-know-btn");
+  ok("X5 裸 www 网址也当链接", !!chip);
+  eq("X6 开之前补上 https", chip.getAttribute("href"), "https://www.baidu.com");
+  r.fire(chip, "click");
+  eq(
+    "X7 点它走系统浏览器",
+    r.calls[r.calls.length - 1],
+    "iq:open:" + encodeURIComponent("https://www.baidu.com")
+  );
+})();
+
+(function () {
+  var r = run({ question: "Q", options: "*A. 甲<br>B. 乙", knowledge: "baike.baidu.com/item/x" });
+  answerFirst(r);
+  var chip = r.feedback().querySelector(".iq-know-btn");
+  eq("X8 带路径的裸域名也是链接", chip.getAttribute("href"), "https://baike.baidu.com/item/x");
+})();
+
+(function () {
+  /* 尖括号包着网址（字段里存的是转义后的 &lt;…&gt;）也要认出来 */
+  var r = run({
+    question: "Q",
+    options: "*A. 甲<br>B. 乙",
+    knowledge: "&lt;https://a.example/x&gt;"
+  });
+  answerFirst(r);
+  var chip = r.feedback().querySelector(".iq-know-btn");
+  eq("X9 尖括号包着的网址照旧认出来", chip.getAttribute("href"), "https://a.example/x");
+})();
+
+(function () {
+  var r = run({
+    question: "Q",
+    options: "*A. 甲<br>B. 乙",
+    knowledge: "唐诗 -> anki:search:tag:唐诗"
+  });
+  answerFirst(r);
+  var chip = r.feedback().querySelector(".iq-know-btn");
+  ok("X10 搜索式还是按钮（不是链接）", !!chip && chip.getAttribute("href") === null);
+  r.fire(chip, "click");
+  eq(
+    "X11 搜索式交给 Anki 卡片浏览器",
+    r.calls[r.calls.length - 1],
+    "iq:open:" + encodeURIComponent("anki:search:tag:唐诗")
+  );
+})();
+
+(function () {
+  /* 富文本链接的锚文字里带「父::子」：显示末级名，href 不变 */
+  var r = run({
+    question: "Q",
+    options: "*A. 甲<br>B. 乙",
+    knowledge: '<a href="https://a.example/x">刑事诉讼法::概述</a>'
+  });
+  answerFirst(r);
+  var chip = r.feedback().querySelector(".iq-know-btn");
+  eq("X12 富文本链接的锚文字也取末级名", chip.textContent, "概述");
+  eq("X13 href 还是那个网址", chip.getAttribute("href"), "https://a.example/x");
 })();
 
 log.join("\n") + "\n----\nPASS=" + pass + " FAIL=" + fail;

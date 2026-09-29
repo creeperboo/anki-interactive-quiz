@@ -89,6 +89,13 @@ Type the statement, then use the checkbox:
 
 Ticked = true, unticked = false — nothing to type by hand.
 
+**Since 1.1.11** a true-false card that was never ticked and has no recorded value is treated as
+**false** at three levels: saving a brand-new card that only has a statement fills in `错` (false);
+opening it in the editor fills in the default; and the add-on heals all such cards once at startup
+(a tooltip reports how many were fixed). The card itself also falls back to "unticked = false" when
+the hidden marker is missing but the statement is not empty, so the 正确 / 错误 buttons show up
+right away.
+
 ### About the `答案` field
 
 **Since 1.1.3 none of the three note types has a `答案` field** (an earlier build added one back by
@@ -122,6 +129,15 @@ click it, and the add-on looks for other cards that share a tag **and** already 
 
 Tags you just typed in the tag box count too. Write the tip once per topic and reuse it on every card.
 
+**Since 1.1.10** the candidate carries its original HTML, so `<br>`, spaces and inline formatting are
+copied verbatim (deduplication still compares the plain text only). A new
+**[🔁 同步到同技巧卡片]** button pushes edits to every card that uses the same tip text across all
+three note types, after a confirmation prompt — only the `解题技巧` field is touched.
+
+**Since 1.1.11** "unchanged" means *both* the plain text **and** the HTML signature are identical, so
+editing nothing but a line break, a space or an `&nbsp;` still counts as a change and gets synced
+(this was the bug: such edits were reported as "unchanged").
+
 ### 知识点: click a tag to jump to a related page after answering
 
 The new `知识点` field takes **one line per tag**: `tag -> target`. After you answer, the card shows
@@ -142,6 +158,19 @@ While authoring you don't have to type the format: under `知识点` there is a
 **[🏷 配置标签链接]** button (collapsed by default). It lists the card's tags, one link box per
 tag, each with **[试打开]** to test the link on the spot; **[🔄 刷新标签]** picks up tags you just
 added to the tag box.
+
+**Since 1.1.10** you can paste a link copied from a browser (it is parsed as HTML: `<a href="…">label</a>`
+uses the href as the target and the label as the tag; the panel shows the URL, so the link is never
+lost). Bare hostnames like `www.baidu.com`, `baike.baidu.com/item/x` or `example.com:8080/path` are
+recognised too and open in your browser with `https://` added (`mailto:`, `ftp://`, `//host` also work);
+`anki:` / `tag:` searches and plain words still go to Anki's card browser.
+
+**Since 1.1.11** pasting into the per-line input reads the *real URL* straight out of the clipboard
+(`text/html` → `<a href>`, then `text/uri-list`, then `text/plain`): a browser's "Copy link" puts the
+link text in the plain flavour and the URL only in the HTML flavour, which a plain text box cannot see.
+Each line also has a **[📋 从剪贴板读链接]** button as a fallback. Tags written as `parent::child`
+are displayed by their last segment only (hover shows the full path; the stored value and the jump
+target still use the full path).
 
 ---
 

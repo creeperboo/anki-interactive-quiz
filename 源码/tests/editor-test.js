@@ -16,24 +16,42 @@ var pycmd = function (message) {
   iqSent.push(String(message));
 };
 
+/* 真实结构（Anki 26 的编辑器就是这样）：
+   .fields > .field-container[data-index] > span.label-name + .editor-field > … > textarea
+   字段名在 span.label-name 里；换笔记类型时 Anki 按位置复用同一批 .field-container，
+   只改 data-index 和这个 span 的文字。 */
+function fieldBlockHTML(index, name) {
+  return (
+    '<div class="field-container" data-index="' + index + '">' +
+    '<span class="label-name">' + name + "</span>" +
+    '<div class="editor-field"><div class="collapsible"><div class="editing-area">' +
+    "<textarea></textarea>" +
+    "</div></div></div>" +
+    "</div>"
+  );
+}
+
+function fieldsHTML(names) {
+  var html = '<div class="fields">';
+  for (var i = 0; i < names.length; i++) {
+    html += fieldBlockHTML(i, names[i]);
+  }
+  return html + "</div>";
+}
+
 function makeEditor(values, fields) {
   var dom = makeDOM();
   var win = {};
   fields = fields || CHOICE_FIELDS;
   values = values || [];
-  var html = '<div class="fields">';
-  for (var i = 0; i < fields.length; i++) {
-    html += '<div class="field-container"><div class="field-label">' + fields[i] + '</div><textarea></textarea></div>';
-  }
-  html += "</div>";
-  dom.document.body.innerHTML = html;
+  dom.document.body.innerHTML = fieldsHTML(fields);
   editorFactory(dom.document, win);
   var areas = dom.document.querySelectorAll(".fields textarea");
   for (var j = 0; j < areas.length; j++) {
     areas[j].value = values[j];
   }
   var api = win.__IQ_EDITOR__;
-  return {
+  var editor = {
     dom: dom,
     win: win,
     api: api,
@@ -102,8 +120,70 @@ function makeEditor(values, fields) {
     },
     questionField: function () {
       return areas[fields.indexOf("\u9898\u76ee")];
+    },
+    /* 某个字段那一整块（按名字找，跟真实编辑器一样认 span.label-name） */
+    containerOf: function (name) {
+      var blocks = dom.document.querySelectorAll(".fields .field-container");
+      for (var i = 0; i < blocks.length; i++) {
+        var label = blocks[i].querySelector(".label-name");
+        if (label && label.textContent === name) {
+          return blocks[i];
+        }
+      }
+      return null;
+    },
+    /* 这块字段当前有没有被插件藏起来 */
+    isHidden: function (name) {
+      var node = editor.containerOf(name);
+      if (!node) {
+        return false;
+      }
+      return !!(
+        node.classList.contains("iq-hidden") ||
+        (node.style && node.style.display === "none") ||
+        node.getAttribute("data-iq-hidden") === "1"
+      );
+    },
+    /* 往某块字段的输入框里塞值（换过题型后 areas 就过期了，得重新查） */
+    putField: function (name, text) {
+      var node = editor.containerOf(name);
+      var box = node ? node.querySelector("textarea") : null;
+      if (box) {
+        box.value = text;
+      }
+      return editor;
+    },
+    /* 换笔记类型：Anki 按位置复用同一批 .field-container，只改 data-index 和字段名 */
+    switchNoteType: function (names) {
+      var blocks = dom.document.querySelectorAll(".fields .field-container");
+      var holder = blocks.length ? blocks[0].parentNode : null;
+      var i;
+      for (i = 0; i < names.length; i++) {
+        if (i < blocks.length) {
+          blocks[i].setAttribute("data-index", String(i));
+          var label = blocks[i].querySelector(".label-name");
+          if (label) {
+            label.textContent = names[i];
+          }
+        } else if (holder) {
+          var tmp = dom.document.createElement("div");
+          tmp.innerHTML = fieldBlockHTML(i, names[i]);
+          var kids = tmp.childNodes.slice();
+          for (var k = 0; k < kids.length; k++) {
+            holder.appendChild(kids[k]);
+          }
+        }
+      }
+      for (i = names.length; i < blocks.length; i++) {
+        if (blocks[i].parentNode) {
+          blocks[i].parentNode.removeChild(blocks[i]);
+        }
+      }
+      fields = names;
+      return editor;
     }
   };
+  return editor;
 }
 
 var has = function (arr, s) {
@@ -132,7 +212,11 @@ function key(e, node, spec) {
   eq("F3 每行有输入框", e.inputs().length, 3);
   eq("F4 每行有勾选框", e.boxes().length, 3);
   eq("F5 标签已去掉（只留内容）", e.inputs()[0].value, "\u7532");
-  eq("F6 原来的选项文本框被藏起来", e.optionField().style.display, "none");
+  eq("F6 整个「选项」字段块被藏起来", e.containerOf("\u9009\u9879").style.display, "none");
+  ok(
+    "F6b 块里的输入框没被动过（不再往 textarea 上打隐藏）",
+    !e.optionField().style || e.optionField().style.display !== "none"
+  );
   ok("F7 没勾选时提示", e.status().indexOf("\u8fd8\u6ca1\u52fe\u9009") >= 0, e.status());
 })();
 
@@ -221,7 +305,7 @@ function key(e, node, spec) {
   var e = makeEditor(["\u592a\u9633\u4ece\u897f\u8fb9\u5347\u8d77\u3002", "", "", "", ""], TF_FIELDS);
   e.install("tf");
   ok("F30 生成了勾选框", !!e.host());
-  var qStyle = e.questionField().style;
+  var qStyle = e.containerOf("\u9898\u76ee").style;
   ok("F31 题目没有被藏起来（真值改存在题目标记里）", !qStyle || qStyle.display !== "none");
   ok("F31b 题型里已经没有「答案」字段", e.fields.indexOf("\u7b54\u6848") < 0);
   eq("F32 初始不勾选", e.boxes()[0].checked, false);
@@ -285,13 +369,13 @@ function key(e, node, spec) {
 (function () {
   var e = makeEditor(["Q", "A. \u7532", "", "", "", ""]);
   e.install("choice");
-  eq("F49 整个「选项」字段块都藏起来", e.optionField().parentNode.style.display, "none");
+  eq("F49 整个「选项」字段块都藏起来", e.containerOf("\u9009\u9879").style.display, "none");
 })();
 
 (function () {
   var e = makeEditor(["Q", "", "", "", "", ""]);
   e.install("choice");
-  eq("F50 「选项」字段名也一起藏住了（整块）", e.optionField().parentNode.style.display, "none");
+  eq("F50 「选项」字段名也一起藏住了（整块）", e.containerOf("\u9009\u9879").style.display, "none");
 })();
 
 /* ---------- 读写接口 ---------- */
@@ -642,25 +726,165 @@ function addTag(dom, name) {
   e.install("choice");
   eq(
     "H33 选择题残留的「答案」整块藏起来",
-    e.answerField().parentNode.style.display,
+    e.containerOf("\u7b54\u6848").style.display,
     "none"
   );
-  eq("H34 选项块也藏得好好的", e.optionField().parentNode.style.display, "none");
+  eq("H34 选项块也藏得好好的", e.containerOf("\u9009\u9879").style.display, "none");
 })();
 
 (function () {
   var OLD_CLOZE = ["\u9898\u76ee", "\u89e3\u6790", "\u89e3\u9898\u6280\u5de7", "\u6765\u6e90", "\u7b54\u6848"];
   var c = makeEditor(["\u9898\u5e72", "", "", "", ""], OLD_CLOZE);
   c.install("cloze");
-  eq("H35 填空题残留的「答案」也藏起来", c.answerField().parentNode.style.display, "none");
+  eq("H35 填空题残留的「答案」也藏起来", c.containerOf("\u7b54\u6848").style.display, "none");
 })();
 
 (function () {
   var OLD_TF = ["\u9898\u76ee", "\u7b54\u6848", "\u89e3\u6790", "\u89e3\u9898\u6280\u5de7", "\u6765\u6e90"];
   var t = makeEditor(["\u9898\u5e72<!--iq-tf:\u5bf9-->", "", "", "", ""], OLD_TF);
   t.install("tf");
-  eq("H36 判断题残留的「答案」也藏起来", t.answerField().parentNode.style.display, "none");
+  eq("H36 判断题残留的「答案」也藏起来", t.containerOf("\u7b54\u6848").style.display, "none");
   ok("H37 判断题勾选框照常能用", t.dom.document.querySelectorAll(".iq-ed-box").length >= 1);
+})();
+
+/* ---------- 1.1.9：切题型字段消失（根因：按节点记隐藏 → 改成按名字重算） ---------- */
+
+/* 现在藏着哪些块（按字段名报） */
+function hiddenList(e) {
+  var out = [];
+  var blocks = e.dom.document.querySelectorAll(".fields .field-container");
+  for (var i = 0; i < blocks.length; i++) {
+    var b = blocks[i];
+    if (b.classList.contains("iq-hidden") || (b.style && b.style.display === "none")) {
+      var label = b.querySelector(".label-name");
+      out.push(label ? label.textContent : "#" + i);
+    }
+  }
+  return out;
+}
+
+/* 还带着我们标记的块有几块 */
+function taggedCount(e) {
+  var out = 0;
+  var blocks = e.dom.document.querySelectorAll(".fields .field-container");
+  for (var i = 0; i < blocks.length; i++) {
+    if (
+      blocks[i].getAttribute("data-iq-hidden") === "1" ||
+      blocks[i].classList.contains("iq-hidden")
+    ) {
+      out++;
+    }
+  }
+  return out;
+}
+
+/* 场景①（复现脚本场景 1）：选择题藏了「选项」→ 切判断题，「解析」不能跟着没 */
+(function () {
+  var e = makeEditor(["Q", "*\u7532\n\u4e59", "", "", "", ""]);
+  e.install("choice");
+  ok(
+    "K1 选择题里只有「选项」被藏",
+    e.isHidden("\u9009\u9879") && !e.isHidden("\u9898\u76ee") && !e.isHidden("\u89e3\u6790")
+  );
+
+  e.switchNoteType(TF_FIELDS); /* 同一批节点被复用，只改字段名 */
+  e.api.tick(); /* 巡检那一轮：对不上就先收摊 */
+  eq("K2 切到判断题后没有字段被藏", hiddenList(e), []);
+  ok("K2b 对不上时控件也摘掉了", e.host() === null);
+  ok("K3 判断题的「解析」还在（没被上一轮的隐藏带累）", !e.isHidden("\u89e3\u6790"));
+
+  e.install("tf"); /* Anki 重发注入：按判断题重建 */
+  ok("K4 判断题控件重建好了", !!e.host());
+  eq("K5 重建后依然没有字段被藏", hiddenList(e), []);
+})();
+
+/* 场景②：选择题 →「正面/背面」这种别的笔记类型，「背面」不能没 */
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""]);
+  e.install("choice");
+  e.switchNoteType(["\u6b63\u9762", "\u80cc\u9762"]);
+  e.api.tick();
+  ok("K6 别的笔记类型里「背面」可见", !e.isHidden("\u80cc\u9762"));
+  eq("K7 一个字段都没被藏", hiddenList(e), []);
+  eq("K8 我们的标记也清干净了", taggedCount(e), 0);
+})();
+
+/* 场景③：老判断题（还残留「答案」字段）→ 别的笔记类型 */
+(function () {
+  var OLD_TF = ["\u9898\u76ee", "\u7b54\u6848", "\u89e3\u6790", "\u89e3\u9898\u6280\u5de7", "\u6765\u6e90"];
+  var e = makeEditor(["\u9898\u5e72<!--iq-tf:\u5bf9-->", "", "", "", ""], OLD_TF);
+  e.install("tf");
+  ok("K9 老判断题里残留的「答案」被藏", e.isHidden("\u7b54\u6848"));
+  e.switchNoteType(["\u6b63\u9762", "\u80cc\u9762"]);
+  e.api.tick();
+  ok("K10 切走后「背面」可见", !e.isHidden("\u80cc\u9762"));
+  eq("K11 没有字段被藏", hiddenList(e), []);
+})();
+
+/* 场景④：页面上的字段名变了（换题型的中间态），绝不能还照着位置去藏 */
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""]);
+  e.install("choice");
+  ok("K12 起始：选择题里「选项」被藏", e.isHidden("\u9009\u9879"));
+  var blocks = e.dom.document.querySelectorAll(".fields .field-container");
+  blocks[1].querySelector(".label-name").textContent = "\u89e3\u6790"; /* 1 号位改名 */
+  e.api.syncHidden();
+  eq("K13 名字对不上时不藏任何块（宁可不藏，也不藏错）", hiddenList(e), []);
+  ok("K13b 上一轮的标记也清干净了", blocks[1].getAttribute("data-iq-hidden") === null);
+})();
+
+/* 场景⑤：插件拿到的字段表和页面对不上（换了笔记类型但没重发注入） */
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""]);
+  e.install("choice");
+  var opt = e.containerOf("\u9009\u9879");
+  ok("K14 起始：选项块被藏、控件在", e.isHidden("\u9009\u9879") && !!e.host());
+  e.switchNoteType(["\u6b63\u9762", "\u80cc\u9762"]);
+  e.api.tick();
+  ok("K15 对不上时控件摘掉", e.host() === null);
+  eq("K16 字段还原（内联 display 清空）", opt.style.display, "");
+  eq("K17 没有任何块还带着我们的标记", taggedCount(e), 0);
+})();
+
+/* 场景⑥：反复收敛不叠加，且不误伤 Anki 自己的 .hide（图片遮挡） */
+(function () {
+  var e = makeEditor(["Q", "*\u7532", "", "", "", ""]);
+  var jiexi = e.containerOf("\u89e3\u6790");
+  jiexi.classList.add("hide");
+  e.install("choice");
+  var first = hiddenList(e);
+  e.api.syncHidden();
+  e.api.syncHidden();
+  e.api.tick();
+  eq("K18 反复 syncHidden 结果不变", hiddenList(e), first);
+  eq("K19 只藏了「选项」", first, ["\u9009\u9879"]);
+  ok(
+    "K20 Anki 自己的 .hide 没被动过",
+    jiexi.classList.contains("hide") && jiexi.getAttribute("data-iq-hidden") === null
+  );
+  ok("K20b .hide 那块也没被写上内联 display", !jiexi.style || jiexi.style.display !== "none");
+})();
+
+/* 场景⑦：字段重排 / 数量变化后，area() 仍按名字取到对的那块 */
+(function () {
+  var e = makeEditor(["Q", "A\u7532", "\u89e3\u6790X", "", "", ""]);
+  e.install("choice");
+  e.switchNoteType([
+    "\u9898\u76ee",
+    "\u89e3\u6790",
+    "\u9009\u9879",
+    "\u89e3\u9898\u6280\u5de7",
+    "\u6765\u6e90",
+    "\u77e5\u8bc6\u70b9",
+  ]);
+  e.putField("\u9898\u76ee", "Q9")
+    .putField("\u89e3\u6790", "J9")
+    .putField("\u9009\u9879", "*\u75329");
+  eq("K21 重排后 area(选项) 取到「选项」那一块", e.api.area("\u9009\u9879").value, "*\u75329");
+  eq("K21b area(题目) 也是按名字", e.api.area("\u9898\u76ee").value, "Q9");
+  e.switchNoteType(TF_FIELDS); /* 页面上没有「选项」这一块了 */
+  eq("K22 页面上没有「选项」时宁可不给，也不乱指一个", e.api.area("\u9009\u9879"), null);
+  eq("K23 判断题的「题目」照样取得到", e.api.area("\u9898\u76ee").value, "Q9");
 })();
 
 (function () {
@@ -668,6 +892,240 @@ function addTag(dom, name) {
   var e = makeEditor(["Q", "\u7532", "", "", "", ""]);
   e.install("choice");
   eq("G13 正常情况下没有错误", e.api.lastError, null);
+})();
+
+/* ---------- 1.1.10：粘过来的富文本链接 / 裸网址 / 技巧连格式搬 + 同步 ---------- */
+(function () {
+  /* 从浏览器复制链接粘进「知识点」：字段里是 <a href="…">，以前会被当成搜索式、网址还会丢 */
+  var e = makeEditor([
+    "Q",
+    "*甲",
+    "",
+    "",
+    "",
+    '<a href="https://baike.baidu.com/item/tang">唐诗</a>'
+  ]);
+  e.install("choice", "", { tags: ["唐诗"] });
+  var hint = e.dom.document.getElementById("iq-ed-knowhint");
+  ok("N1 富文本链接预览里照样有标签", hint.textContent.indexOf("唐诗") >= 0, hint.textContent);
+  e.fire(e.dom.document.getElementById("iq-ed-knowtoggle"), "click");
+  var panel = e.dom.document.getElementById("iq-ed-knowpanel");
+  var input = panel.querySelectorAll(".iq-ed-knowrow-input")[0];
+  eq("N2 面板里显示的是网址（不是锚文字）", input.value, "https://baike.baidu.com/item/tang");
+  e.fire(input, "blur");
+  eq(
+    "N3 提交后写成「标签 -> 网址」，网址没丢",
+    e.stored("知识点"),
+    "唐诗 -> https://baike.baidu.com/item/tang"
+  );
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*甲", "", "", "", "www.baidu.com"]);
+  e.install("choice");
+  e.fire(e.dom.document.getElementById("iq-ed-knowtoggle"), "click");
+  var panel = e.dom.document.getElementById("iq-ed-knowpanel");
+  var input = panel.querySelectorAll(".iq-ed-knowrow-input")[0];
+  eq("N4 裸域名在面板里就是那一行", input.value, "www.baidu.com");
+  e.fire(panel.querySelectorAll(".iq-ed-mini")[0], "click");
+  eq(
+    "N5 「试打开」把裸域名交给插件补协议",
+    e.sent()[e.sent().length - 1],
+    "iq:editor:open:" + encodeURIComponent("www.baidu.com")
+  );
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*甲", "", "", "", ""]);
+  e.install("choice");
+  e.api.showTips({
+    tags: ["唐诗"],
+    total: 1,
+    items: [
+      { nid: 9, tip: "先看选项再想朝代", tip_html: "<b>先看选项</b><br>再想朝代&nbsp;", tags: ["唐诗"] }
+    ]
+  });
+  var panel = e.dom.document.getElementById("iq-ed-tipspanel");
+  e.fire(panel.querySelector(".iq-ed-mini"), "click");
+  eq(
+    "N6 「用这条」搬的是原始 HTML（换行/空格都在）",
+    e.stored("解题技巧"),
+    "<b>先看选项</b><br>再想朝代&nbsp;"
+  );
+  ok(
+    "N7 填完提示「已填入」",
+    e.dom.document.getElementById("iq-ed-tipsbar").textContent.indexOf("已填入") >= 0
+  );
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*甲", "", "先看选项再想朝代", "", ""]);
+  e.install("choice");
+  var bar = e.dom.document.getElementById("iq-ed-tipsbar");
+  var sync = bar.querySelectorAll(".iq-ed-mini")[1];
+  ok(
+    "N8 技巧栏有「同步到同技巧卡片」按钮",
+    !!sync && sync.textContent.indexOf("同步") >= 0,
+    sync && sync.textContent
+  );
+  e.fire(sync, "click");
+  eq(
+    "N9 点同步带上打开时的技巧基准",
+    e.sent()[e.sent().length - 1],
+    "iq:editor:sync-tip:" + encodeURIComponent("先看选项再想朝代")
+  );
+})();
+
+(function () {
+  var e = makeEditor(["Q", "*甲", "", "先看选项再想朝代", "", ""]);
+  e.install("choice");
+  var bar = e.dom.document.getElementById("iq-ed-tipsbar");
+  e.api.showSyncResult({ ok: true, total: 3, synced: 2, tip_html: "<b>新技巧</b>" });
+  ok("N10 同步成功提示张数", bar.textContent.indexOf("3") >= 0, bar.textContent);
+  eq("N10a 同步成功后基准换成刚写出去那份", e.api.tipBase, "<b>新技巧</b>");
+  e.api.showSyncResult({ ok: false, reason: "empty" });
+  ok("N11 空内容提示先填", bar.textContent.indexOf("填上内容") >= 0, bar.textContent);
+  e.api.showSyncResult({ ok: false, reason: "unchanged" });
+  ok("N12 没改动有提示", bar.textContent.indexOf("没改动") >= 0, bar.textContent);
+  e.api.showSyncResult({ ok: false, reason: "only-self" });
+  ok("N13 只有本卡时有提示", bar.textContent.indexOf("没有别的卡片") >= 0, bar.textContent);
+  e.api.showSyncResult({ ok: false, reason: "declined" });
+  ok("N14 取消后也有提示", bar.textContent.indexOf("已取消") >= 0, bar.textContent);
+})();
+
+/* ---------- 1.1.11：从浏览器粘链接（真网址在 text/html 里）/ 📋 兜底 / 子标签显示 ---------- */
+function knowInput(e) {
+  var panel = e.dom.document.getElementById("iq-ed-knowpanel");
+  return panel ? panel.querySelectorAll(".iq-ed-knowrow-input")[0] : null;
+}
+
+function openKnow(e) {
+  e.fire(e.dom.document.getElementById("iq-ed-knowtoggle"), "click");
+  return e.dom.document.getElementById("iq-ed-knowpanel");
+}
+
+(function () {
+  /* 浏览器「复制链接」：text/plain 只有锚文字，真网址在 text/html 的 href 里 */
+  var e = makeEditor(["Q", "*甲", "", "", "", ""]);
+  e.install("choice", "", { tags: ["唐诗"] });
+  openKnow(e);
+  var input = knowInput(e);
+  var prevented = 0;
+  e.fire(input, "paste", {
+    preventDefault: function () {
+      prevented++;
+    },
+    clipboardData: {
+      getData: function (type) {
+        if (type === "text/html") {
+          return '<a href="https://baike.baidu.com/item/tang">唐诗</a>';
+        }
+        if (type === "text/plain") {
+          return "唐诗";
+        }
+        return "";
+      }
+    }
+  });
+  eq("N15 粘链接时输入框换成真网址", input.value, "https://baike.baidu.com/item/tang");
+  eq("N16 拦下这次粘贴", prevented, 1);
+  eq(
+    "N17 写回字段是「标签 -> 网址」",
+    e.stored("知识点"),
+    "唐诗 -> https://baike.baidu.com/item/tang"
+  );
+})();
+
+(function () {
+  /* 粘的是普通文字（不是链接）：别抢，照常粘 */
+  var e = makeEditor(["Q", "*甲", "", "", "", ""]);
+  e.install("choice", "", { tags: ["唐诗"] });
+  openKnow(e);
+  var input = knowInput(e);
+  var prevented = 0;
+  e.fire(input, "paste", {
+    preventDefault: function () {
+      prevented++;
+    },
+    clipboardData: {
+      getData: function () {
+        return "唐诗";
+      }
+    }
+  });
+  eq("N18 普通文字不拦", prevented, 0);
+  eq("N19 输入框也没被改", input.value, "");
+})();
+
+(function () {
+  /* 已经粘成文字了：点每行的「📋 读链接」，插件读剪贴板再推回来 */
+  var e = makeEditor(["Q", "*甲", "", "", "", ""]);
+  e.install("choice", "", { tags: ["唐诗"] });
+  var panel = openKnow(e);
+  var minis = panel.querySelectorAll(".iq-ed-mini");
+  var clipBtn = null;
+  for (var i = 0; i < minis.length; i++) {
+    if (minis[i].textContent.indexOf("读链接") >= 0) {
+      clipBtn = minis[i];
+    }
+  }
+  ok("N20 每行有「📋 读链接」按钮", !!clipBtn, panel.textContent);
+  e.fire(clipBtn, "click");
+  eq("N21 点它请插件去读剪贴板", e.sent()[e.sent().length - 1], "iq:editor:clip:0");
+  var done = e.api.applyClipboard("https://a.example/x", 0);
+  eq("N22 推回来的网址填进那一行", knowInput(e).value, "https://a.example/x");
+  eq("N23 也写回了字段", e.stored("知识点"), "唐诗 -> https://a.example/x");
+  eq("N24 读到链接返回 true", done, true);
+  var bar = e.dom.document.getElementById("iq-ed-knowbar");
+  ok("N24a 提示已读入", bar.textContent.indexOf("已读入") >= 0, bar.textContent);
+  var none = e.api.applyClipboard("", 0);
+  eq("N25 读不到返回 false", none, false);
+  ok("N25a 读不到时教怎么操作", bar.textContent.indexOf("没读到链接") >= 0, bar.textContent);
+})();
+
+(function () {
+  /* 子标签：字段里是完整路径，行名只显示末级名，写回仍旧是全路径 */
+  var e = makeEditor([
+    "Q",
+    "*甲",
+    "",
+    "",
+    "",
+    "刑事诉讼法::刑事诉讼法概述 -> https://a.example/x"
+  ]);
+  e.install("choice");
+  var hint = e.dom.document.getElementById("iq-ed-knowhint");
+  ok(
+    "N26 收起时预览只显示末级名",
+    hint.textContent.indexOf("刑事诉讼法概述") >= 0 && hint.textContent.indexOf("::") < 0,
+    hint.textContent
+  );
+  var panel = openKnow(e);
+  var row = panel.querySelectorAll(".iq-ed-knowrow")[0];
+  eq("N27 行名只显示末级名", row.querySelectorAll(".iq-ed-knowrow-name")[0].textContent, "刑事诉讼法概述");
+  eq("N28 完整路径留在 data-label 里", row.getAttribute("data-label"), "刑事诉讼法::刑事诉讼法概述");
+  ok("N28a 悬停能看到完整路径", row.querySelectorAll(".iq-ed-knowrow-name")[0].getAttribute("title") === "刑事诉讼法::刑事诉讼法概述");
+  e.fire(row.querySelectorAll(".iq-ed-knowrow-input")[0], "blur");
+  eq(
+    "N29 写回字段仍用完整路径",
+    e.stored("知识点"),
+    "刑事诉讼法::刑事诉讼法概述 -> https://a.example/x"
+  );
+})();
+
+(function () {
+  /* 打开时记住的「原技巧」是原始 HTML（不是去标签文字），后面只改格式才比得出来 */
+  var e = makeEditor(["Q", "*甲", "", "先看选项<br>再想朝代", "", ""]);
+  e.install("choice");
+  eq("N30 同步基准留着原始 HTML", e.api.tipBase, "先看选项<br>再想朝代");
+  var bar = e.dom.document.getElementById("iq-ed-tipsbar");
+  var sync = bar.querySelectorAll(".iq-ed-mini")[1];
+  e.fire(sync, "click");
+  eq(
+    "N31 点同步仍带上打开时那份原始 HTML",
+    e.sent()[e.sent().length - 1],
+    "iq:editor:sync-tip:" + encodeURIComponent("先看选项<br>再想朝代")
+  );
 })();
 
 log.join("\n") + "\n----\nPASS=" + pass + " FAIL=" + fail;

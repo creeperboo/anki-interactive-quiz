@@ -26,8 +26,6 @@
   API.built = false;
   /* 字段名 -> 当前内容（纯文本）。由插件在注入时给初值，之后我们自己的改动同步更新。 */
   API.values = API.values || {};
-  /* 被我们整块藏起来的字段容器（选项、以及删不掉的「答案」） */
-  API.hiddenAreas = API.hiddenAreas || [];
 
   /* ---------------- 小工具 ---------------- */
 
@@ -64,6 +62,133 @@
     return areas;
   }
 
+  /* ---------------- 字段块的定位：按名字，不靠顺序 ----------------
+
+     Anki 26 的编辑器里，字段列表是 Svelte 的「按数组下标做 key」：换笔记类型时
+     它按位置复用同一批 .field-container 节点，只改 data-index 和字段名。
+     字段名在 <span class="label-name"> 里（".field-label" 只是 slot 名，不是 class）。
+     所以「藏字段、挂控件」都得先按名字确认这块真的是那个字段，
+     只按位置记着「我藏过第 2 块」的话，换题型就会把新题型的字段带累。 */
+
+  function fieldBlocks() {
+    var blocks = qsa(".fields .field-container");
+    if (!blocks.length) {
+      blocks = qsa(".field-container");
+    }
+    return blocks;
+  }
+
+  function trimText(text) {
+    return String(text === null || text === undefined ? "" : text)
+      .replace(/[\s\u00a0]+/g, " ")
+      .replace(/^ | $/g, "");
+  }
+
+  /* 这块字段叫什么（认不出来返回空串） */
+  function blockName(node) {
+    if (!node || typeof node.querySelector !== "function") {
+      return "";
+    }
+    var label = null;
+    try {
+      label = node.querySelector(".label-name");
+    } catch (e) {
+      label = null;
+    }
+    return label ? trimText(label.textContent) : "";
+  }
+
+  function blockIndex(node) {
+    var raw = node && node.getAttribute ? node.getAttribute("data-index") : null;
+    var num = parseInt(raw, 10);
+    return isNaN(num) ? -1 : num;
+  }
+
+  /* 按字段名找字段块。名字对得上才认；读不到名字又对不上字段表时返回 null ——
+     宁可不藏（顶多自己多显示一块），也绝不藏错（那会让用户没法填）。 */
+  function blockFor(name) {
+    var blocks = fieldBlocks();
+    if (!blocks.length) {
+      return null;
+    }
+    var want = API.index(name);
+    var named = [];
+    var readable = false;
+    for (var i = 0; i < blocks.length; i++) {
+      var label = blockName(blocks[i]);
+      if (label) {
+        readable = true;
+      }
+      if (label === name) {
+        named.push(blocks[i]);
+      }
+    }
+    if (named.length > 1 && want >= 0) {
+      for (var j = 0; j < named.length; j++) {
+        if (blockIndex(named[j]) === want) {
+          return named[j];
+        }
+      }
+    }
+    if (named.length) {
+      return named[0];
+    }
+    /* 老版本 Anki 上字段名读不到：只在块数和字段表一致、位置也对得上时才敢认 */
+    if (readable || want < 0) {
+      return null;
+    }
+    var names = (API.cfg && API.cfg.fields) || [];
+    if (blocks.length !== names.length) {
+      return null;
+    }
+    var node = blocks[want] || null;
+    if (node && blockIndex(node) >= 0 && blockIndex(node) !== want) {
+      return null;
+    }
+    return node;
+  }
+
+  API.blockFor = blockFor;
+
+  /* 字段块里的输入代理 textarea（字段内容由插件从 Python 侧给，这儿只当兜底） */
+  function areaIn(node) {
+    if (!node || typeof node.querySelector !== "function") {
+      return null;
+    }
+    var inner = null;
+    try {
+      inner = node.querySelector("textarea");
+    } catch (e) {
+      inner = null;
+    }
+    return inner || null;
+  }
+
+  /* 页面上的字段表，跟插件给的 cfg 对不对得上。
+     换题型的中间态会短暂对不上 —— 那时候先别动手，免得把控件挂到别人的字段上。 */
+  function domMatchesCfg() {
+    var names = (API.cfg && API.cfg.fields) || [];
+    if (!names.length) {
+      return false;
+    }
+    var blocks = fieldBlocks();
+    if (blocks.length !== names.length) {
+      return false;
+    }
+    for (var i = 0; i < blocks.length; i++) {
+      var at = blockIndex(blocks[i]);
+      if (at >= 0 && at !== i) {
+        return false;
+      }
+      var label = blockName(blocks[i]);
+      if (label && label !== names[i]) {
+        return false;
+      }
+    }
+    /* 一个名字都读不出来的老版本：退回「块数对得上就算对得上」，仍走按顺序的老路 */
+    return true;
+  }
+
   API.index = function (name) {
     if (!API.cfg || !API.cfg.fields) {
       return -1;
@@ -71,7 +196,28 @@
     return API.cfg.fields.indexOf(name);
   };
 
+  /* 页面上的字段名读不读得出来（只有读不出来时才允许按顺序兜底） */
+  function namesReadable() {
+    var blocks = fieldBlocks();
+    for (var i = 0; i < blocks.length; i++) {
+      if (blockName(blocks[i])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   API.area = function (name) {
+    var inner = areaIn(blockFor(name));
+    if (inner) {
+      return inner;
+    }
+    /* 兜底：老版本 Anki 的字段名读不出来时，退回按顺序取。
+       能读出名字却没匹配上（换题型的中间态、字段被改过）时绝不兜底 ——
+       宁可不写，也不能把内容写到别人的字段里。 */
+    if (namesReadable()) {
+      return null;
+    }
     var idx = API.index(name);
     var areas = allAreas();
     if (idx < 0 || idx >= areas.length) {
@@ -218,9 +364,13 @@
     return ok;
   };
 
-  function hide(node) {
+  /* 藏 / 还原是一对：只认我们自己打过标记的字段块（data-iq-hidden），
+     绝不去碰 Anki 自己的 .field-container.hide（那是图片遮挡在用的）。 */
+  var HIDE_MARK = "data-iq-hidden";
+
+  function hideBlock(node) {
     if (!node) {
-      return;
+      return null;
     }
     if (!node.style) {
       node.style = {};
@@ -234,6 +384,54 @@
       /* 编辑器重新渲染时可能会覆盖内联样式，用 class 兜一层 */
       node.classList.add("iq-hidden");
     }
+    if (node.setAttribute) {
+      node.setAttribute(HIDE_MARK, "1");
+    }
+    return node;
+  }
+
+  function unhideBlock(node) {
+    if (!node) {
+      return null;
+    }
+    if (node.classList && typeof node.classList.remove === "function") {
+      node.classList.remove("iq-hidden");
+    }
+    if (node.style) {
+      if (typeof node.style.removeProperty === "function") {
+        try {
+          node.style.removeProperty("display");
+        } catch (e) {
+          /* 忽略 */
+        }
+      }
+      node.style.display = "";
+    }
+    if (node.removeAttribute) {
+      node.removeAttribute(HIDE_MARK);
+    }
+    return node;
+  }
+
+  /* 现在被我们藏着的块（可能还带着上一轮、上一个题型的痕迹） */
+  function taggedBlocks() {
+    var out = [];
+    function add(node) {
+      if (node && out.indexOf(node) < 0) {
+        out.push(node);
+      }
+    }
+    var marked = qsa(".iq-hidden");
+    for (var i = 0; i < marked.length; i++) {
+      add(marked[i]);
+    }
+    var blocks = fieldBlocks();
+    for (var j = 0; j < blocks.length; j++) {
+      if (blocks[j].getAttribute && blocks[j].getAttribute(HIDE_MARK) === "1") {
+        add(blocks[j]);
+      }
+    }
+    return out;
   }
 
   function hasToken(node, token) {
@@ -322,14 +520,14 @@
   }
 
   /* 把我们的控件插在某个字段容器的后面 */
-  function hostAfter(area) {
+  function hostAfter(area, block) {
     var old = document.getElementById("iq-ed-host");
     if (old && old.parentNode) {
       old.parentNode.removeChild(old);
     }
     var host = el("div", "iq-ed-host");
     host.setAttribute("id", "iq-ed-host");
-    var anchor = fieldContainer(area) || area;
+    var anchor = block || fieldContainer(area) || area;
     var parent = anchor.parentNode || (document.body || null);
     if (!parent) {
       return host;
@@ -343,21 +541,91 @@
     return host;
   }
 
-  /* 把整个字段容器（连同它上面的字段名）藏起来，只留我们的控件 */
-  function hideFieldContainer(area) {
-    if (!area) {
-      return null;
+  /* 当前题型下「该整块藏起来」的字段名。
+
+     1.1.4 的 hideLeftoverAnswerField() 由这里接手：题型里万一还残留着「答案」字段
+     （Anki 接口不肯删时）也整块藏起来，保证「添加卡片」窗口里看不到它。 */
+  function hiddenNames() {
+    var mode = API.cfg ? API.cfg.mode : "";
+    var names = (API.cfg && API.cfg.fields) || [];
+    var out = [];
+    if (mode === "choice") {
+      out.push("\u9009\u9879");
     }
-    hide(area);
-    var node = fieldContainer(area);
-    if (node) {
-      hide(node);
-      if (API.hiddenAreas.indexOf(node) < 0) {
-        API.hiddenAreas.push(node);
+    if (mode === "choice" || mode === "tf" || mode === "cloze") {
+      if (names.indexOf("\u7b54\u6848") >= 0) {
+        out.push("\u7b54\u6848");
       }
     }
-    return node;
+    return out;
   }
+
+  /* 把「藏了谁」收敛到当前题型该藏的那几个：不在名单上的，一律还原回去。
+
+     每一轮都重算（build 和 900ms 巡检都调）：
+     换了题型、编辑器重新渲染之后会自己回到正确状态，不会像以前那样把上一个题型的
+     隐藏状态跟着节点带到新题型的同位置字段上。幂等，反复调没副作用。 */
+  API.syncHidden = function () {
+    var want = hiddenNames();
+    var keep = [];
+    for (var i = 0; i < want.length; i++) {
+      var block = blockFor(want[i]);
+      if (block && keep.indexOf(block) < 0) {
+        keep.push(block);
+      }
+    }
+    var tagged = taggedBlocks();
+    for (var j = 0; j < tagged.length; j++) {
+      if (keep.indexOf(tagged[j]) < 0) {
+        unhideBlock(tagged[j]);
+      }
+    }
+    for (var k = 0; k < keep.length; k++) {
+      hideBlock(keep[k]);
+    }
+    return keep.length;
+  };
+
+  /* 我们插进编辑器页面的控件 */
+  var OUR_IDS = [
+    "iq-ed-host",
+    "iq-ed-tipsbar",
+    "iq-ed-tipspanel",
+    "iq-ed-knowbar",
+    "iq-ed-knowpanel",
+  ];
+
+  /* 收摊：摘掉我们的控件，并把我们藏过的字段全部还原（不是我们的题型时，一个都不留） */
+  API.teardown = function () {
+    if (document.getElementById) {
+      for (var i = 0; i < OUR_IDS.length; i++) {
+        var node = document.getElementById(OUR_IDS[i]);
+        if (node && node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      }
+    }
+    API.rows = [];
+    API.list = null;
+    API.status = null;
+    API.paintTf = null;
+    API.built = false;
+    API.syncHidden();
+    return true;
+  };
+
+  /* 不是我们的题型时把巡检停掉，别白跑 */
+  API.stopAlive = function () {
+    if (API.timer && typeof clearInterval === "function") {
+      try {
+        clearInterval(API.timer);
+      } catch (e) {
+        /* 忽略 */
+      }
+    }
+    API.timer = null;
+    return true;
+  };
 
   /* ---------------- 解析 ---------------- */
 
@@ -631,9 +899,8 @@
     return true;
   };
 
-  function buildChoice(area) {
-    hideFieldContainer(area);
-    var host = hostAfter(area);
+  function buildChoice(area, block) {
+    var host = hostAfter(area, block);
     host.appendChild(
       el("div", "iq-ed-title", "\u9009\u9879\uff08\u4e00\u884c\u4e00\u4e2a\uff0c\u53f3\u4fa7\u52fe\u9009\u6b63\u786e\u7b54\u6848\uff09")
     );
@@ -709,8 +976,8 @@
     }
   }
 
-  function buildTrueFalse(area) {
-    var host = hostAfter(area);
+  function buildTrueFalse(area, block) {
+    var host = hostAfter(area, block);
     var truth = currentTfFlag();
     var wrapper = el("label", "iq-ed-tf");
     var box = el("input", "iq-ed-box");
@@ -743,8 +1010,8 @@
 
   /* ---------------- 填空题：只报状态 ---------------- */
 
-  function buildCloze(area) {
-    var host = hostAfter(area);
+  function buildCloze(area, block) {
+    var host = hostAfter(area, block);
     var status = el("div", "iq-ed-status");
     status.setAttribute("id", "iq-ed-cloze-status");
     host.appendChild(status);
@@ -780,11 +1047,10 @@
     if (API.clozeWatch) {
       return;
     }
-    var index = API.index("\u9898\u76ee");
-    if (index < 0) {
+    if (API.index("\u9898\u76ee") < 0) {
       return;
     }
-    API.clozeWatch = watchField(index, askHostForValues(500));
+    API.clozeWatch = watchField("\u9898\u76ee", askHostForValues(500));
   }
 
   /* 插件把最新字段值推回来（只用来刷新填空题状态行） */
@@ -855,8 +1121,7 @@
   }
 
   function buildTipsBar() {
-    var area = API.area("\u89e3\u9898\u6280\u5de7");
-    var container = area ? fieldContainer(area) : null;
+    var container = blockFor("\u89e3\u9898\u6280\u5de7");
     if (!container) {
       return;
     }
@@ -882,8 +1147,63 @@
         }
       })
     );
+    /* 在「解题技巧」里改完，一键把新内容同步到全库用同一条技巧的卡 */
+    bar.appendChild(
+      miniButton("\ud83d\udd01 \u540c\u6b65\u5230\u540c\u6280\u5de7\u5361\u7247", function () {
+        if (typeof pycmd !== "function") {
+          barHint(bar, "\u6ca1\u6709\u63d2\u4ef6\u901a\u9053\uff0c\u540c\u6b65\u4e0d\u4e86");
+          return;
+        }
+        barHint(bar, "\u6b63\u5728\u540c\u6b65\u2026");
+        try {
+          pycmd(
+            "iq:editor:sync-tip:" + encodeURIComponent(API.tipBase === undefined ? "" : API.tipBase)
+          );
+        } catch (e) {
+          barHint(bar, "\u627e\u4e0d\u5230\u63d2\u4ef6\u901a\u9053");
+        }
+      })
+    );
     barHint(bar, "");
   }
+
+  /* 插件把同步结果推过来 */
+  API.showSyncResult = function (payload) {
+    payload = payload || {};
+    var bar = document.getElementById ? document.getElementById("iq-ed-tipsbar") : null;
+    if (!bar) {
+      return false;
+    }
+    var reason = payload.reason || "";
+    var text;
+    if (payload.ok) {
+      text =
+        "\u5df2\u540c\u6b65\u5230 " +
+        (payload.total || payload.synced || 0) +
+        " \u5f20\u5361\u7247\uff08\u542b\u672c\u5361\uff09";
+    } else if (reason === "empty") {
+      text = "\u5148\u5728\u300c\u89e3\u9898\u6280\u5de7\u300d\u91cc\u586b\u4e0a\u5185\u5bb9";
+    } else if (reason === "unchanged") {
+      text =
+        "\u6ca1\u6539\u52a8\uff1a\u5185\u5bb9\u548c\u683c\u5f0f\u90fd\u8ddf\u6253\u5f00\u65f6\u4e00\u6837";
+    } else if (reason === "no-base") {
+      text = "\u8bfb\u4e0d\u5230\u539f\u6280\u5de7\uff1a\u5148\u5173\u6389\u91cd\u5f00\u8fd9\u5f20\u5361\u518d\u8bd5";
+    } else if (reason === "only-self") {
+      text = "\u6ca1\u6709\u522b\u7684\u5361\u7247\u7528\u8fd9\u6761\u6280\u5de7";
+    } else if (reason === "declined") {
+      text = "\u5df2\u53d6\u6d88\uff0c\u6ca1\u540c\u6b65";
+    } else if (payload.error) {
+      text = "\u540c\u6b65\u5931\u8d25\uff1a" + payload.error;
+    } else {
+      text = "\u6ca1\u80fd\u540c\u6b65";
+    }
+    barHint(bar, text);
+    if (payload.ok && payload.tip_html !== undefined && payload.tip_html !== null) {
+      /* 同步成功：基准换成刚写出去的那一份，连着改第二次也能对上 */
+      API.tipBase = String(payload.tip_html);
+    }
+    return true;
+  };
 
   /* 插件把候选技巧推过来 */
   API.showTips = function (payload) {
@@ -926,7 +1246,11 @@
     var row = el("div", "iq-ed-panel-row");
     row.appendChild(
       miniButton("\u7528\u8fd9\u6761", function () {
-        commitField("\u89e3\u9898\u6280\u5de7", item.tip);
+        /* 连格式一起搬：<br>、&nbsp;、行内格式都保留 */
+        var text = item.tip_html || item.tip || "";
+        commitField("\u89e3\u9898\u6280\u5de7", text);
+        /* 基准换成刚写进来这一份（它就是别的卡也在用的那条） */
+        API.tipBase = text;
         barHint(bar, "\u5df2\u586b\u5165");
         if (panel.parentNode) {
           panel.parentNode.removeChild(panel);
@@ -945,11 +1269,145 @@
 
   /* ---------------- 知识点：标签 -> 链接（逐行配，卡片上点标签跳转） ---------------- */
 
+  /* 点了「📋 读链接」的那一行输入框；插件把剪贴板里的网址推回来时填它 */
+  var clipPending = null;
+
   function trimSpace(text) {
     return String(text === null || text === undefined ? "" : text).replace(
       /^[\s\u00a0]+|[\s\u00a0]+$/g,
       ""
     );
+  }
+
+  /* 标签只显示自己那一段：字段里存的是完整路径「父::子」，显示末级名 */
+  function lastSegment(label) {
+    var full = trimSpace(label);
+    var parts = String(full).split("::");
+    var last = trimSpace(parts[parts.length - 1]);
+    return last || full;
+  }
+
+  /* 剪贴板里的真网址：优先 text/html 里的 <a href>，再 text/uri-list，最后纯文本
+     （纯文本只有它自己就是网址才算）。跟插件侧 _clipboard_link() 一套顺序。 */
+  function linkFromClipboard(clip) {
+    if (!clip || typeof clip.getData !== "function") {
+      return "";
+    }
+    var html = "";
+    try {
+      html = String(clip.getData("text/html") || "");
+    } catch (e) {
+      html = "";
+    }
+    if (html) {
+      var m = /<a\b([^>]*)>/i.exec(html);
+      if (m) {
+        var href = trimSpace(decodeEntities(hrefOf(m[1])));
+        if (href && isWebTarget(href)) {
+          return href;
+        }
+      }
+    }
+    var uri = "";
+    try {
+      uri = String(clip.getData("text/uri-list") || "");
+    } catch (e) {
+      uri = "";
+    }
+    var firstUri = trimSpace(String(uri).split(/[\r\n]+/)[0] || "");
+    if (firstUri && isWebTarget(firstUri)) {
+      return firstUri;
+    }
+    var plain = "";
+    try {
+      plain = String(clip.getData("text/plain") || "");
+    } catch (e) {
+      plain = "";
+    }
+    plain = trimSpace(plain);
+    if (plain && isWebTarget(plain)) {
+      return plain;
+    }
+    return "";
+  }
+
+  /* 目标规整：去前后空白（含全角空格），全角冒号只在协议位置归一半角 */
+  function normalizeTarget(target) {
+    var t = String(target === null || target === undefined ? "" : target).replace(
+      /\u3000/g,
+      " "
+    );
+    t = trimSpace(t);
+    var m = /^([A-Za-z][A-Za-z0-9+.\-]*)\uff1a/.exec(t);
+    if (m) {
+      t = m[1] + ":" + t.slice(m[0].length);
+    }
+    return t;
+  }
+
+  /* 像网址吗？跟卡片端、插件侧一套规则（裸域名、www.、//主机 都算） */
+  function isWebTarget(target) {
+    var t = normalizeTarget(target);
+    if (!t) {
+      return false;
+    }
+    var low = t.toLowerCase();
+    if (/^(https?|ftp|file|mailto):/.test(low)) {
+      return true;
+    }
+    if (t.indexOf("//") === 0) {
+      return true;
+    }
+    if (low.indexOf("www.") === 0) {
+      return true;
+    }
+    if (/[\s\u3000]/.test(t)) {
+      return false;
+    }
+    if (!/^[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+(:\d+)?([\/?#].*)?$/.test(t)) {
+      return false;
+    }
+    var host = t.split(/[\/?#]/)[0].split(":")[0];
+    var parts = host.split(".");
+    var last = parts[parts.length - 1];
+    return last.length >= 2 && /^[A-Za-z0-9]+$/.test(last);
+  }
+
+  /* 网址补协议：www.x.com -> https://www.x.com */
+  function webUrl(target) {
+    var t = normalizeTarget(target);
+    if (/^(https?|ftp|file|mailto):/i.test(t)) {
+      return t;
+    }
+    if (t.indexOf("//") === 0) {
+      return "https:" + t;
+    }
+    return "https://" + t;
+  }
+
+  function hrefOf(attrs) {
+    var m = /href\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(String(attrs || ""));
+    if (!m) {
+      return "";
+    }
+    var raw = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+    return String(raw || "");
+  }
+
+  /* 一行里夹着网址（「唐诗 https://…」或「<https://…>」）：前半当标签 */
+  function splitEmbeddedTarget(text) {
+    var parts = String(text || "").split(/[\s\u3000]+/);
+    for (var i = 0; i < parts.length; i++) {
+      var token = parts[i].replace(/^[<>「」《》]+|[<>「」《》]+$/g, "");
+      if (token && token !== text && isWebTarget(token)) {
+        return {
+          label: trimSpace(parts.slice(0, i).join(" ")) || token,
+          target: token,
+          bare: false
+        };
+      }
+    }
+    return null;
   }
 
   /* 一行「标签 -> 链接」；只写链接没有标签的老写法也认（bare = true） */
@@ -973,16 +1431,59 @@
         return { label: label || target, target: target, bare: false };
       }
     }
+    var embedded = splitEmbeddedTarget(first);
+    if (embedded) {
+      return embedded;
+    }
     return { label: first, target: first, bare: true };
+  }
+
+  /* 字段 HTML 按行切开，但把 <a href="…"> 留在行里（要取 href） */
+  function htmlLinesKeepLinks(html) {
+    var s = String(html === null || html === undefined ? "" : html);
+    s = s.replace(/<script[\s\S]*?<\/script\s*>/gi, "");
+    s = s.replace(/<style[\s\S]*?<\/style\s*>/gi, "");
+    s = s.replace(/<\s*br\s*\/?\s*>/gi, "\n");
+    s = s.replace(
+      /<\s*\/\s*(div|p|li|tr|h[1-6]|section|article|blockquote|pre|ul|ol|table|dd|dt)\s*>/gi,
+      "\n"
+    );
+    s = s.replace(
+      /<\s*(div|p|li|tr|h[1-6]|section|article|blockquote|pre|ul|ol|table|dd|dt)\b[^>]*>/gi,
+      "\n"
+    );
+    return s.split(/\r\n|\r|\n/);
+  }
+
+  /* 一行 HTML：优先认 <a href="…">锚文字</a>（从浏览器粘链接就是这个形状），
+     取 href 当跳转目标、锚文字当标签；没有就退回纯文字写法。 */
+  function knowledgeLineFromHtml(line) {
+    var text = String(line === null || line === undefined ? "" : line);
+    var re = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      var href = trimSpace(decodeEntities(hrefOf(m[1])));
+      if (!href) {
+        continue;
+      }
+      var label = trimSpace(htmlToText(m[2]));
+      return { label: label || href, target: href, bare: !label };
+    }
+    var plain = knowledgeLine(htmlToText(text));
+    if (plain && plain.target) {
+      return plain;
+    }
+    /* 整行就是 <某个网址>（尖括号包着）时，上面的去标签会把整行吃空，这里再认一次 */
+    return knowledgeLine(decodeEntities(text));
   }
 
   /* 字段里所有有效行（标签重复只留第一条），顺序就是卡片上标签的顺序 */
   function knowledgeItems() {
-    var lines = String(API.nativeText("\u77e5\u8bc6\u70b9") || "").split(/\r\n|\r|\n/);
+    var lines = htmlLinesKeepLinks(API.rawText("\u77e5\u8bc6\u70b9"));
     var out = [];
     var seen = {};
     for (var i = 0; i < lines.length; i++) {
-      var item = knowledgeLine(lines[i]);
+      var item = knowledgeLineFromHtml(lines[i]);
       if (!item || !item.target) {
         continue;
       }
@@ -1050,6 +1551,10 @@
         isTag: false,
       });
     }
+    /* 显示用末级名，写回/判重一律用完整路径（label） */
+    for (var n = 0; n < rows.length; n++) {
+      rows[n].shown = lastSegment(rows[n].label);
+    }
     return rows;
   }
 
@@ -1068,7 +1573,7 @@
     }
     var labels = [];
     for (var i = 0; i < items.length; i++) {
-      labels.push(items[i].label);
+      labels.push(lastSegment(items[i].label));
     }
     hint.textContent = "\u5361\u7247\u4e0a\u4f1a\u663e\u793a\uff1a" + labels.join(" \u00b7 ");
     return true;
@@ -1082,19 +1587,35 @@
     }
     var rows = panel.querySelectorAll(".iq-ed-knowrow");
     for (var i = 0; i < rows.length; i++) {
-      var name = rows[i].querySelector(".iq-ed-knowrow-name");
       var input = rows[i].querySelector(".iq-ed-knowrow-input");
-      if (name && input) {
-        out[String(name.textContent || "")] = String(input.value === null || input.value === undefined ? "" : input.value);
+      /* 标签一律从 data-label 读（完整路径）；行名只显示末级名，不能拿它当标签 */
+      var label = rowLabel(rows[i]);
+      if (label && input) {
+        out[label] = String(input.value === null || input.value === undefined ? "" : input.value);
       }
     }
     return out;
   }
 
-  function buildKnowledgeRow(panel, bar, row, typed) {
+  /* 面板某一行代表的标签（完整路径） */
+  function rowLabel(row) {
+    if (!row || typeof row.getAttribute !== "function") {
+      return "";
+    }
+    return String(row.getAttribute("data-label") || "");
+  }
+
+  function buildKnowledgeRow(panel, bar, row, typed, rowIndex) {
     var node = el("div", "iq-ed-panel-row iq-ed-knowrow");
     node.setAttribute("data-bare", row.bare ? "1" : "0");
-    node.appendChild(el("div", "iq-ed-knowrow-name", row.label));
+    node.setAttribute("data-label", row.label);
+    node.setAttribute("data-row", String(rowIndex || 0));
+    var nameNode = el("div", "iq-ed-knowrow-name", row.shown || lastSegment(row.label));
+    /* 显示的是末级名，悬停能看到完整路径 */
+    if (nameNode.setAttribute) {
+      nameNode.setAttribute("title", row.label);
+    }
+    node.appendChild(nameNode);
     var input = el("input", "iq-ed-knowrow-input");
     input.setAttribute("type", "text");
     input.setAttribute("placeholder", "\u7f51\u5740\uff0c\u6216 anki:search:tag:\u2026");
@@ -1114,6 +1635,21 @@
         commitKnowledge();
       }
     });
+    /* 从浏览器「复制链接」粘进来时，剪贴板的 text/plain 只有锚文字，
+       真网址藏在 text/html 的 href 里。这里优先把真网址抠出来。 */
+    input.addEventListener("paste", function (ev) {
+      var url = linkFromClipboard(ev && ev.clipboardData);
+      if (!url) {
+        /* 不是网址就什么都不做，照常粘贴 */
+        return;
+      }
+      if (ev && ev.preventDefault) {
+        ev.preventDefault();
+      }
+      input.value = url;
+      commitKnowledge();
+      barHint(bar, "\u5df2\u8bfb\u5165\uff1a" + url);
+    });
     node.appendChild(input);
     node.appendChild(
       miniButton("\u8bd5\u6253\u5f00", function () {
@@ -1130,9 +1666,9 @@
             /* 落到下面的兜底 */
           }
         }
-        if (typeof window.open === "function" && /^(https?|mailto):/i.test(target)) {
+        if (typeof window.open === "function" && isWebTarget(target)) {
           try {
-            window.open(target, "_blank");
+            window.open(webUrl(target), "_blank");
           } catch (e) {
             /* 忽略 */
           }
@@ -1146,7 +1682,23 @@
           node.parentNode.removeChild(node);
         }
         commitKnowledge();
-        barHint(bar, "\u5df2\u79fb\u9664\uff1a" + row.label);
+        barHint(bar, "\u5df2\u79fb\u9664\uff1a" + (row.shown || lastSegment(row.label)));
+      })
+    );
+    /* 兜底：已经粘成文字了，点这个从剪贴板重新读一次真网址 */
+    node.appendChild(
+      miniButton("\ud83d\udccb \u8bfb\u94fe\u63a5", function () {
+        clipPending = input;
+        if (typeof pycmd !== "function") {
+          barHint(bar, "\u6ca1\u6709\u63d2\u4ef6\u901a\u9053\uff0c\u8bfb\u4e0d\u4e86\u526a\u8d34\u677f");
+          return;
+        }
+        barHint(bar, "\u6b63\u5728\u8bfb\u526a\u8d34\u677f\u2026");
+        try {
+          pycmd("iq:editor:clip:" + String(rowIndex || 0));
+        } catch (e) {
+          barHint(bar, "\u8bfb\u4e0d\u4e86\u526a\u8d34\u677f");
+        }
       })
     );
     panel.appendChild(node);
@@ -1166,7 +1718,7 @@
     panel.setAttribute("id", "iq-ed-knowpanel");
     var rows = knowledgeRows();
     for (var i = 0; i < rows.length; i++) {
-      buildKnowledgeRow(panel, bar, rows[i], typed);
+      buildKnowledgeRow(panel, bar, rows[i], typed, i);
     }
     if (!rows.length) {
       panel.appendChild(
@@ -1197,9 +1749,9 @@
     var rows = panel.querySelectorAll(".iq-ed-knowrow");
     var lines = [];
     for (var i = 0; i < rows.length; i++) {
-      var name = rows[i].querySelector(".iq-ed-knowrow-name");
       var input = rows[i].querySelector(".iq-ed-knowrow-input");
-      var label = name ? String(name.textContent || "") : "";
+      /* 标签从 data-label 读（完整路径）；行名只是末级名的显示，不能当标签 */
+      var label = rowLabel(rows[i]);
       var target = input ? trimSpace(input.value) : "";
       if (!target) {
         continue;
@@ -1211,6 +1763,7 @@
     var saved = commitField("\u77e5\u8bc6\u70b9", text);
     if (saved) {
       /* 宿主马上会把字段推回来；这里先自己同步一份，免得预览还是旧的 */
+      API.raw["\u77e5\u8bc6\u70b9"] = text;
       API.native["\u77e5\u8bc6\u70b9"] = text;
     }
     paintKnowledgeHint();
@@ -1227,18 +1780,59 @@
     return hasItems;
   }
 
-  function watchField(index, onInput) {
-    if (typeof document.querySelectorAll !== "function") {
-      return null;
+  /* 插件读到了剪贴板里的网址（或空）：填进那一行并写回字段 */
+  API.applyClipboard = function (url, index) {
+    var panel = document.getElementById ? document.getElementById("iq-ed-knowpanel") : null;
+    var bar = document.getElementById ? document.getElementById("iq-ed-knowbar") : null;
+    var input = null;
+    if (panel && index !== undefined && index !== null) {
+      var rows = panel.querySelectorAll(".iq-ed-knowrow");
+      var row = rows[Number(index)];
+      input = row ? row.querySelector(".iq-ed-knowrow-input") : null;
     }
-    var containers = qsa('.field-container[data-index="' + index + '"]');
-    if (!containers.length) {
-      var all = qsa(".field-container");
-      containers = all[index] ? [all[index]] : [];
+    if (!input) {
+      input = clipPending;
     }
-    var target = containers.length
-      ? containers[0].querySelector(".rich-text-editable") || containers[0].querySelector("textarea")
-      : null;
+    var text = String(url === null || url === undefined ? "" : url);
+    if (!text) {
+      if (bar) {
+        barHint(
+          bar,
+          "\u6ca1\u8bfb\u5230\u94fe\u63a5\uff1a\u8bf7\u5bf9\u7740\u7f51\u9875\u4e0a\u7684\u94fe\u63a5\u53f3\u952e \u2192 \u590d\u5236\u94fe\u63a5\u5730\u5740\uff0c\u518d\u70b9\u4e00\u6b21"
+        );
+      }
+      return false;
+    }
+    if (input) {
+      input.value = text;
+      commitKnowledge();
+    }
+    if (bar) {
+      barHint(bar, "\u5df2\u8bfb\u5165\uff1a" + text);
+    }
+    return true;
+  };
+
+  function watchField(name, onInput) {
+    function editableIn(node) {
+      if (!node || typeof node.querySelector !== "function") {
+        return null;
+      }
+      var found = null;
+      try {
+        found = node.querySelector(".rich-text-editable") || node.querySelector("textarea");
+      } catch (e) {
+        found = null;
+      }
+      return found;
+    }
+    var target = editableIn(blockFor(name));
+    if (!target) {
+      /* 兜底：读不到字段名的老结构，按顺序找 */
+      var index = API.index(name);
+      var containers = qsa(".field-container");
+      target = index >= 0 && containers[index] ? editableIn(containers[index]) : null;
+    }
     if (!target || typeof target.addEventListener !== "function") {
       return null;
     }
@@ -1266,8 +1860,7 @@
   }
 
   function buildKnowledgeBar() {
-    var area = API.area("\u77e5\u8bc6\u70b9");
-    var container = area ? fieldContainer(area) : null;
+    var container = blockFor("\u77e5\u8bc6\u70b9");
     if (!container) {
       return;
     }
@@ -1292,7 +1885,7 @@
     var hint = el("div", "iq-ed-bar-hint");
     hint.setAttribute("id", "iq-ed-knowhint");
     bar.appendChild(hint);
-    watchField(API.index("\u77e5\u8bc6\u70b9"), askHostForValues(400));
+    watchField("\u77e5\u8bc6\u70b9", askHostForValues(400));
     paintKnowledge();
   }
 
@@ -1300,29 +1893,13 @@
     if (!API.cfg || !API.cfg.mode) {
       return;
     }
-    hideLeftoverAnswerField();
+    /* 隐藏交给按名字重算的 syncHidden()：换题型时不会把上一个题型的隐藏带过来 */
+    API.syncHidden();
     if (!document.getElementById || !document.getElementById("iq-ed-tipsbar")) {
       buildTipsBar();
     }
     if (!document.getElementById || !document.getElementById("iq-ed-knowbar")) {
       buildKnowledgeBar();
-    }
-  }
-
-  /* 1.1.4：题型里万一还残留着「答案」字段（Anki 接口不肯删时），在编辑器里整块藏起来，
-     保证「添加卡片」窗口里看不到它。字段已经删掉时这里是空转。 */
-  function hideLeftoverAnswerField() {
-    var mode = API.cfg ? API.cfg.mode : "";
-    if (mode !== "choice" && mode !== "tf" && mode !== "cloze") {
-      return;
-    }
-    if (API.index("\u7b54\u6848") < 0) {
-      return;
-    }
-    var area = API.area("\u7b54\u6848");
-    var node = area ? fieldContainer(area) : null;
-    if (node && API.hiddenAreas.indexOf(node) < 0) {
-      hideFieldContainer(area);
     }
   }
 
@@ -1348,32 +1925,32 @@
     if (old && old.parentNode) {
       old.parentNode.removeChild(old);
     }
-    API.hiddenAreas = [];
     API.rows = [];
     API.list = null;
     API.status = null;
     API.built = false;
     API.lastError = null;
     var mode = API.cfg ? API.cfg.mode : "";
+    if (mode !== "choice" && mode !== "tf" && mode !== "cloze") {
+      /* 不是我们的题型：把控件摘掉、把我们藏过的字段全还原，不在别人的编辑器里留东西 */
+      API.teardown();
+      return false;
+    }
     try {
-      if (mode === "choice") {
-        var optionsArea = API.area("\u9009\u9879");
-        if (optionsArea) {
-          buildChoice(optionsArea);
-          API.built = true;
+      /* 先按字段名找到那块（选择题挂「选项」，判断/填空挂「题目」），
+         找不到就先不建，等字段渲染好了再来（宁可不建，也不挂到别人的字段上） */
+      var anchorName = mode === "choice" ? "\u9009\u9879" : "\u9898\u76ee";
+      var block = blockFor(anchorName);
+      var area = areaIn(block);
+      if (area) {
+        if (mode === "choice") {
+          buildChoice(area, block);
+        } else if (mode === "tf") {
+          buildTrueFalse(area, block);
+        } else {
+          buildCloze(area, block);
         }
-      } else if (mode === "tf") {
-        var questionArea = API.area("\u9898\u76ee");
-        if (questionArea) {
-          buildTrueFalse(questionArea);
-          API.built = true;
-        }
-      } else if (mode === "cloze") {
-        var clozeArea = API.area("\u9898\u76ee");
-        if (clozeArea) {
-          buildCloze(clozeArea);
-          API.built = true;
-        }
+        API.built = true;
       }
     } catch (e) {
       /* 出错就当没这回事，绝不挡着编辑；但记下来，方便排查 */
@@ -1388,6 +1965,7 @@
     }
     try {
       ensureBars();
+      API.syncHidden();
     } catch (e) {
       API.lastError = API.lastError || String((e && e.stack) || e);
     }
@@ -1395,42 +1973,52 @@
     return API.built;
   };
 
+  /* 巡检的一轮：先比对，再补隐藏、补控件。
+
+     每一轮先比对「页面上的字段名」和插件给的字段表：
+     对不上（换题型的中间态、或者停在别人的题型上）就先收摊、把字段全还原，
+     绝不把控件和隐藏挂到别人的字段上；对上了再补。 */
+  API.tick = function () {
+    if (!API.cfg || !API.cfg.mode) {
+      /* 明确不是我们的题型：收摊，别白跑 */
+      API.stopAlive();
+      return false;
+    }
+    if (!domMatchesCfg()) {
+      /* 中间态：先摘掉控件、把字段全还原。定时器留着 ——
+         万一 Anki 没重发注入，切回来对上之后还能自己重建 */
+      API.teardown();
+      return false;
+    }
+    API.syncHidden();
+    if (!document.getElementById || !document.getElementById("iq-ed-host")) {
+      API.build();
+      return API.built;
+    }
+    ensureBars();
+    return true;
+  };
+
   /* 编辑器偶尔会重新渲染字段，把我们的隐藏/控件抹掉——每隔一会儿补一次 */
   API.keepAlive = function () {
     if (API.timer || typeof setInterval !== "function") {
       return;
     }
-    API.timer = setInterval(function () {
-      if (!API.cfg || !API.cfg.mode) {
-        return;
-      }
-      for (var h = 0; h < API.hiddenAreas.length; h++) {
-        var hidden = API.hiddenAreas[h];
-        var stillHidden =
-          hidden &&
-          hidden.parentNode &&
-          ((hidden.style && hidden.style.display === "none") ||
-            (hidden.classList &&
-              hidden.classList.contains &&
-              hidden.classList.contains("iq-hidden")));
-        if (hidden && hidden.parentNode && !stillHidden) {
-          hide(hidden);
-        }
-      }
-      if (!document.getElementById("iq-ed-host")) {
-        API.build();
-      } else {
-        ensureBars();
-      }
-    }, 900);
+    API.timer = setInterval(API.tick, 900);
   };
 
   /* 每次编辑器载入另一张笔记 / 换了题型，Anki 会重新注入一次 */
   window.__IQ_EDITOR__ = API;
 
-  /* 注入的时机可能早于字段渲染出来（页面还在加载），所以没找到就过一会儿再试 */
+  /* 注入的时机可能早于字段渲染出来（页面还在加载），所以没找到就过一会儿再试。
+     不是我们的题型就直接收摊，别白试 40 次。 */
   API.buildWhenReady = function (tries) {
     tries = tries || 0;
+    if (!API.cfg || !API.cfg.mode) {
+      API.teardown();
+      API.stopAlive();
+      return false;
+    }
     if (API.build()) {
       return true;
     }
@@ -1443,15 +2031,22 @@
   };
 
   window.__IQ_EDITOR_INSTALL__ = function (cfg) {
+    /* 换笔记类型 / 换笔记时 Anki 会重发一次注入：先按新配置收摊，
+       把上一轮摘控件、藏字段的痕迹清干净，再从零建一次 */
     API.cfg = cfg || null;
     API.values = {};
     API.native = {};
     API.raw = {};
     API.tfLocal = "";
+    API.tipBase = "";
+    API.teardown();
     if (API.cfg && API.cfg.values) {
       API.setValues(API.cfg.values);
       API.setNative(API.cfg.values);
     }
+    /* 这次打开笔记时「解题技巧」的原始内容：同步时当基准（之后只有
+       「用这条」「同步成功」两处会刷新它，刷新字段值不会动它） */
+    API.tipBase = API.rawText("\u89e3\u9898\u6280\u5de7");
     return API.buildWhenReady(0);
   };
 })();

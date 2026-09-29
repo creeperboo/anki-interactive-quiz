@@ -433,6 +433,19 @@
     var tfFlag = readTfFlag();
     if (tfFlag) {
       answers = [[tfFlag]];
+    } else if (!answers.length) {
+      /* 1.1.11 兜底：只有判断题模板才多留一份 #iq-raw-question。它的正文非空、
+         又没有任何真值标记、也没有老「答案」时，就按界面里「不勾 = 错」
+         当成真值「错」。这样不管是新建、编辑器改写还是导入来的判断题，
+         正面都能直接出「正确 / 错误」两个按钮。
+         选择题/填空题模板没有这个隐藏节点，不受影响。 */
+      var rawQuestion = $("iq-raw-question");
+      var rawQuestionText = rawQuestion
+        ? trim(htmlToText(rawQuestion.innerHTML).replace(/[\s\u00a0]+/g, ""))
+        : "";
+      if (rawQuestionText) {
+        answers = [["\u9519"]];
+      }
     }
     return {
       options: options,
@@ -450,6 +463,75 @@
 
   /* 「知识点」：制卡时一行写一条「标签 -> 链接」（只写链接也认），
      卡片上每个标签一个可点的标签，点谁跳谁；标签重复只留第一条。 */
+
+  /* 目标规整：去前后空白（含全角空格），全角冒号只在协议位置归一半角 */
+  function normalizeTarget(target) {
+    var t = String(target === null || target === undefined ? "" : target);
+    t = t.replace(/\u3000/g, " ");
+    t = t.replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
+    var m = /^([A-Za-z][A-Za-z0-9+.\-]*)\uff1a/.exec(t);
+    if (m) {
+      t = m[1] + ":" + t.slice(m[0].length);
+    }
+    return t;
+  }
+
+  /* 像网址吗？插件侧 is_web_target 跟这里必须是一套规则：
+     认协议、//主机、www.、以及「点号分段、末段至少两位字母数字」的裸域名。 */
+  function isWebTarget(target) {
+    var t = normalizeTarget(target);
+    if (!t) {
+      return false;
+    }
+    var low = t.toLowerCase();
+    if (/^(https?|ftp|file|mailto):/.test(low)) {
+      return true;
+    }
+    if (t.indexOf("//") === 0) {
+      return true;
+    }
+    if (low.indexOf("www.") === 0) {
+      return true;
+    }
+    if (/[\s\u3000]/.test(t)) {
+      return false;
+    }
+    if (!/^[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+(:\d+)?([\/?#].*)?$/.test(t)) {
+      return false;
+    }
+    var host = t.split(/[\/?#]/)[0].split(":")[0];
+    var parts = host.split(".");
+    var last = parts[parts.length - 1];
+    return last.length >= 2 && /^[A-Za-z0-9]+$/.test(last);
+  }
+
+  /* 网址补协议：www.x.com -> https://www.x.com */
+  function webUrl(target) {
+    var t = normalizeTarget(target);
+    if (/^(https?|ftp|file|mailto):/i.test(t)) {
+      return t;
+    }
+    if (t.indexOf("//") === 0) {
+      return "https:" + t;
+    }
+    return "https://" + t;
+  }
+
+  /* 一行里夹着网址（「唐诗 https://…」或「<https://…>」）：前半当标签 */
+  function splitEmbeddedTarget(text) {
+    var parts = String(text || "").split(/[\s\u3000]+/);
+    for (var i = 0; i < parts.length; i++) {
+      var token = parts[i].replace(/^[<>「」《》]+|[<>「」《》]+$/g, "");
+      if (token && token !== text && isWebTarget(token)) {
+        return {
+          label: trim(parts.slice(0, i).join(" ")) || token,
+          target: token
+        };
+      }
+    }
+    return null;
+  }
+
   function parseKnowledgeLine(line) {
     var first = trim(line);
     if (!first) {
@@ -466,20 +548,74 @@
     if (cut > 0) {
       label = trim(first.slice(0, cut));
       target = trim(first.slice(cut + width));
+      if (target) {
+        return { label: label || target, target: target };
+      }
+      label = first;
+      target = first;
     }
-    if (!target) {
-      return null;
+    var embedded = splitEmbeddedTarget(first);
+    if (embedded) {
+      return embedded;
     }
     return { label: label || target, target: target };
   }
 
+  /* 字段 HTML 按行切开，但把 <a href="…"> 留在行里（要取 href） */
+  function htmlLinesKeepLinks(html) {
+    var s = String(html === null || html === undefined ? "" : html);
+    s = s.replace(/<script[\s\S]*?<\/script\s*>/gi, "");
+    s = s.replace(/<style[\s\S]*?<\/style\s*>/gi, "");
+    s = s.replace(/<\s*br\s*\/?\s*>/gi, "\n");
+    s = s.replace(
+      /<\s*\/\s*(div|p|li|tr|h[1-6]|section|article|blockquote|pre|ul|ol|table|dd|dt)\s*>/gi,
+      "\n"
+    );
+    s = s.replace(
+      /<\s*(div|p|li|tr|h[1-6]|section|article|blockquote|pre|ul|ol|table|dd|dt)\b[^>]*>/gi,
+      "\n"
+    );
+    return s.split(/\r\n|\r|\n/);
+  }
+
+  function hrefOf(attrs) {
+    var m = /href\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(String(attrs || ""));
+    if (!m) {
+      return "";
+    }
+    var raw = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+    return trim(decodeEntities(String(raw || "")));
+  }
+
+  /* 一行 HTML：优先认 <a href="…">锚文字</a>（从浏览器粘链接就是这个形状），
+     没有就退回纯文字写法。 */
+  function parseKnowledgeLineFromHtml(line) {
+    var text = String(line === null || line === undefined ? "" : line);
+    var re = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      var href = hrefOf(m[1]);
+      if (!href) {
+        continue;
+      }
+      var label = trim(htmlToText(m[2]));
+      return { label: label || href, target: href };
+    }
+    var plain = parseKnowledgeLine(htmlToText(text));
+    if (plain && plain.target) {
+      return plain;
+    }
+    /* 整行就是 <某个网址>（尖括号包着）时，上面的去标签会把整行吃空，这里再认一次 */
+    return parseKnowledgeLine(decodeEntities(text));
+  }
+
   function parseKnowledge(html) {
-    var lines = splitLines(html);
+    var lines = htmlLinesKeepLinks(html);
     var out = [];
     var seen = {};
     for (var i = 0; i < lines.length; i++) {
-      var item = parseKnowledgeLine(lines[i]);
-      if (!item) {
+      var item = parseKnowledgeLineFromHtml(lines[i]);
+      if (!item || !item.target) {
         continue;
       }
       if (Object.prototype.hasOwnProperty.call(seen, item.label)) {
@@ -491,13 +627,9 @@
     return out;
   }
 
-  function isWebLink(target) {
-    return /^(https?|mailto|file|ftp):/i.test(String(target || ""));
-  }
-
   /* 答完题后点「相关知识点」：桌面端交给插件（网址开浏览器 / 其它当 Anki 搜索式） */
   function openKnowledge(target) {
-    return send("iq:open:" + encodeURIComponent(target));
+    return send("iq:open:" + encodeURIComponent(normalizeTarget(target)));
   }
 
   function buildKnowledgeNode(data) {
@@ -525,24 +657,34 @@
 
   /* 一个标签一个可点的标签：网址在桌面端交给插件开浏览器（手机上就是普通链接），
      非网址交给插件在卡片浏览器里搜。 */
+  /* 字段里存的是完整路径（父::子），卡片上只显示末级名；跳转目标仍用完整内容 */
+  function displayLabel(label) {
+    var full = trim(label);
+    var parts = String(full).split("::");
+    var last = trim(parts[parts.length - 1]);
+    return last || full;
+  }
+
   function buildKnowledgeChip(box, item, searches) {
-    if (isWebLink(item.target)) {
+    var shown = displayLabel(item.label);
+    if (isWebTarget(item.target)) {
+      var url = webUrl(item.target);
       var link = document.createElement("a");
       link.setAttribute("class", "iq-know-btn");
-      link.setAttribute("href", item.target);
+      link.setAttribute("href", url);
       link.setAttribute("target", "_blank");
       link.setAttribute("rel", "noopener");
-      link.appendChild(el("span", "iq-know-text", item.label));
+      link.appendChild(el("span", "iq-know-text", shown));
       link.addEventListener("click", function (ev) {
         /* 桌面插件能处理就拦下来，交给系统浏览器；手机上让它自己跳 */
-        if (openKnowledge(item.target) && ev && ev.preventDefault) {
+        if (openKnowledge(url) && ev && ev.preventDefault) {
           ev.preventDefault();
         }
       });
       box.appendChild(link);
       return;
     }
-    var btn = el("button", "iq-know-btn", item.label);
+    var btn = el("button", "iq-know-btn", shown);
     btn.setAttribute("type", "button");
     btn.addEventListener("click", function () {
       openKnowledge(item.target);

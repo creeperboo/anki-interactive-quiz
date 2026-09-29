@@ -65,6 +65,7 @@ NOTIFY_HOOKS = [
     "main_window_did_init",
     "editor_did_load_note",
     "editor_did_init_buttons",
+    "add_cards_did_add_note",
 ]
 HOOK_NAMES = sorted(FILTER_HOOKS | set(NOTIFY_HOOKS))
 
@@ -97,9 +98,60 @@ class FakeQTimer:
         fn()
 
 
+class FakeUrl:
+    def __init__(self, text):
+        self.text = text
+
+    def toString(self):
+        return self.text
+
+    def __str__(self):
+        return self.text
+
+
+class FakeMime:
+    """剪贴板里那一坨 MIME 数据（HTML / uri-list / 纯文本）。"""
+
+    def __init__(self, html="", urls=None, text=""):
+        self._html = html
+        self._urls = list(urls or [])
+        self._text = text
+
+    def html(self):
+        return self._html
+
+    def urls(self):
+        return list(self._urls)
+
+    def text(self):
+        return self._text
+
+
+class FakeClipboard:
+    def __init__(self):
+        self.mime = None
+
+    def setMime(self, mime):
+        self.mime = mime
+
+    def mimeData(self):
+        return self.mime
+
+
+class FakeQApplication:
+    """只到「拿系统剪贴板」为止；用例自己往里面塞 FakeMime。"""
+
+    board = FakeClipboard()
+
+    @classmethod
+    def clipboard(cls):
+        return cls.board
+
+
 qt = types.ModuleType("aqt.qt")
 qt.QAction = FakeAction
 qt.QTimer = FakeQTimer
+qt.QApplication = FakeQApplication
 
 utils = types.ModuleType("aqt.utils")
 utils.messages = []
@@ -186,12 +238,22 @@ class FakeDB:
 
     def __init__(self):
         self.note_tags = {11: ["历史"], 12: ["语文"], 13: ["历史", "语文"]}
+        self.revlog_max = 0  # 每真记一次评级 +1，模拟 revlog 多一行
+        self.revlog_lag = 0  # >0 时头几次读还是老值，模拟「后台晚一拍才写完」
 
     def list(self, sql, *args):
         if "FROM tags" in sql and args:
             tag = args[0]
             return [nid for nid, tags in self.note_tags.items() if tag in tags]
         return []
+
+    def scalar(self, sql, *args):
+        if "revlog" in sql:
+            if self.revlog_lag > 0:
+                self.revlog_lag -= 1
+                return self.revlog_max - 1
+            return self.revlog_max
+        return None
 
 
 class FakeNoteData:
@@ -264,13 +326,27 @@ class FakeProfileManager:
 
 
 class FakeReviewer:
-    def __init__(self, card):
+    """照着 Anki 26.9.x 的 Reviewer 复刻那道闸：题目面直接调 _answerCard 会被丢掉。"""
+
+    def __init__(self, card, state="question"):
         self.card = card
+        self.state = state
         self.answered = []
+        self.shown = 0  # _showAnswer 被调了几次（翻没翻页）
         self.bottom = types.SimpleNamespace(bottomWeb=None)
 
+    def _showAnswer(self):
+        if self.state != "question":
+            return
+        self.shown += 1
+        self.state = "answer"
+
     def _answerCard(self, ease):
+        if self.state != "answer":
+            return  # Anki 26.9.x 开头那道闸
         self.answered.append(ease)
+        self.state = "transition"
+        mw.col.db.revlog_max += 1
 
 
 class FakeMenu:
@@ -370,6 +446,7 @@ eq("P20 别的消息不接管", hooks["webview_did_receive_js_message"].run((Fal
 
 hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:3", mw.reviewer)
 eq("P21 答对用良好", mw.reviewer.answered, [3])
+eq("P21b 记分没有翻到答案面", mw.reviewer.shown, 0)
 
 mw.reviewer = FakeReviewer(FakeCard(102))
 hooks["webview_did_receive_js_message"].run((False, None), "iq:wrong", mw.reviewer)
@@ -415,6 +492,118 @@ class NoAnswerReviewer(FakeReviewer):
 mw.reviewer = NoAnswerReviewer(FakeCard(107))
 hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:3", mw.reviewer)
 eq("P34 _answerCard 缺失时回退底部按钮", mw.reviewer.bottom.bottomWeb.evals, ["pycmd('ease3')"])
+
+# 题目面直接评级（26.9.x 那道 state 闸逼出来的「静默记分」）
+mw.reviewer = FakeReviewer(FakeCard(108))
+hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:4", mw.reviewer)
+eq("P34a 题目面点评级照样记上", mw.reviewer.answered, [4])
+eq("P34b 记分不翻页", mw.reviewer.shown, 0)
+eq("P34c 卡片交给下一张", mw.reviewer.state, "transition")
+
+mw.reviewer = FakeReviewer(FakeCard(109), state="answer")
+hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:2", mw.reviewer)
+eq("P34d 已经在答案面时直接评级", mw.reviewer.answered, [2])
+eq("P34e 不会重复翻页", mw.reviewer.shown, 0)
+
+mw.reviewer = FakeReviewer(FakeCard(110), state="transition")
+hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:3", mw.reviewer)
+eq("P34f 正在切下一张时不重复记分", mw.reviewer.answered, [])
+
+
+class ReadOnlyStateReviewer:
+    """state 是只读属性（将来 Anki 真改成 property）：必须自动退回「翻页 → 评级」。"""
+
+    def __init__(self, card):
+        self.card = card
+        self._state = "question"
+        self.answered = []
+        self.shown = 0
+        self.bottom = types.SimpleNamespace(bottomWeb=None)
+
+    @property
+    def state(self):
+        return self._state
+
+    def _showAnswer(self):
+        if self._state != "question":
+            return
+        self.shown += 1
+        self._state = "answer"
+
+    def _answerCard(self, ease):
+        if self._state != "answer":
+            return
+        self.answered.append(ease)
+        self._state = "transition"
+        mw.col.db.revlog_max += 1
+
+
+class StrictReviewer(ReadOnlyStateReviewer):
+    """闸更深：光改 state 不认，必须真翻过面（模拟 Anki 以后换校验方式）。"""
+
+    def __init__(self, card):
+        super().__init__(card)
+        self.shown_answer = False
+
+    def _showAnswer(self):
+        if self._state != "question":
+            return
+        self.shown += 1
+        self._state = "answer"
+        self.shown_answer = True
+
+    def _answerCard(self, ease):
+        if not self.shown_answer:
+            return
+        self.answered.append(ease)
+        self._state = "transition"
+        mw.col.db.revlog_max += 1
+
+
+class BareReviewer(ReadOnlyStateReviewer):
+    """连 _showAnswer 都没有（很老 / 很新的 Anki）：最后只能点底部按钮。"""
+
+    _showAnswer = None
+
+
+mw.reviewer = ReadOnlyStateReviewer(FakeCard(111))
+hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:2", mw.reviewer)
+eq("P34g state 只读时自动退回翻页评级", mw.reviewer.answered, [2])
+eq("P34h 这条回退确实翻了一次页", mw.reviewer.shown, 1)
+
+mw.reviewer = StrictReviewer(FakeCard(112))
+hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:1", mw.reviewer)
+eq("P34i 闸更深时也只记一次", mw.reviewer.answered, [1])
+eq("P34j 这条回退也会翻页", mw.reviewer.shown, 1)
+
+mw.reviewer = BareReviewer(FakeCard(113))
+mw.reviewer.bottom = types.SimpleNamespace(
+    bottomWeb=types.SimpleNamespace(evals=[], eval=lambda js: mw.reviewer.bottom.bottomWeb.evals.append(js))
+)
+hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:2", mw.reviewer)
+eq("P34k 连 _showAnswer 都没有时退回底部按钮", mw.reviewer.bottom.bottomWeb.evals, ["pycmd('ease2')"])
+
+
+class BackstageReviewer(FakeReviewer):
+    """万一以后 Anki 连「收下这次评级」也丢后台：当场什么都不变，下一轮才看到进展。"""
+
+    def _answerCard(self, ease):
+        if self.state != "answer":
+            return
+        self.answered.append(ease)
+        mw.col.db.revlog_max += 1
+        # 故意不动 state：让第一轮三信号全落空，只能靠 revlog 的那次复查认出来
+
+
+try:
+    mw.col.db.revlog_max = 0
+    mw.col.db.revlog_lag = 2  # 头两次读 revlog 还是老值
+    mw.reviewer = BackstageReviewer(FakeCard(114))
+    hooks["webview_did_receive_js_message"].run((False, None), "iq:grade:1", mw.reviewer)
+    eq("P34l 后台晚一拍时也只记一次", mw.reviewer.answered, [1])
+    eq("P34m 后台晚一拍也不会翻页", mw.reviewer.shown, 0)
+finally:
+    mw.col.db.revlog_lag = 0
 
 # ------------------------------------------------------------------ 统计
 eq("P35 初始没有任何记录", mod.count_answers(), 0)
@@ -1436,6 +1625,461 @@ mod.fetch_latest_version = _saved_latest
 mod.askUser = _saved_ask
 mod.download_and_install_update = _saved_download
 mod.UPDATE_REPO = _saved_repo
+
+# ------------------------------------------------------------------ 1.1.10：粘贴链接 / 裸网址
+# 从浏览器复制链接粘进「知识点」时，字段里存的是富文本 <a href="…">，
+# 以前是先转纯文字再解析 → 链接没了、锚文字被当成搜索式。
+eq(
+    "P266 富文本链接取 href 当目标、锚文字当标签",
+    mod.parse_knowledge('<a href="https://baike.baidu.com/item/%E5%94%90%E8%AF%97">唐诗</a>'),
+    [("唐诗", "https://baike.baidu.com/item/%E5%94%90%E8%AF%97")],
+)
+eq(
+    "P267 锚文字本身就是网址时标签也用网址",
+    mod.parse_knowledge('<a href="https://www.baidu.com">https://www.baidu.com</a>'),
+    [("https://www.baidu.com", "https://www.baidu.com")],
+)
+eq(
+    "P268 锚文字为空时标签退回网址",
+    mod.parse_knowledge('<a href="https://a.example/x"></a>'),
+    [("https://a.example/x", "https://a.example/x")],
+)
+eq(
+    "P269 富文本行和纯文字行混着写也认",
+    mod.parse_knowledge(
+        '<div><a href="https://a.example/1">唐诗</a></div><div>宋词 -&gt; tag:宋词</div>'
+    ),
+    [("唐诗", "https://a.example/1"), ("宋词", "tag:宋词")],
+)
+eq(
+    "P270 一行里夹着网址：前半当标签",
+    mod.parse_knowledge("唐诗 https://zh.wikipedia.org/wiki/静夜思"),
+    [("唐诗", "https://zh.wikipedia.org/wiki/静夜思")],
+)
+eq(
+    "P271 尖括号包着的网址也认",
+    mod.parse_knowledge("<https://a.example/x>"),
+    [("https://a.example/x", "https://a.example/x")],
+)
+
+for _web in (
+    "https://a.example/x",
+    "http://a.example",
+    "www.baidu.com",
+    "baike.baidu.com/item/x",
+    "example.com:8080/path",
+    "//cdn.example/x",
+    "ftp://files.example/x",
+    "file:///c:/x.html",
+    "mailto:me@example.com",
+    "https：//a.example/x",
+    "  WWW.Baidu.com  ",
+):
+    ok("P272 像网址：%s" % _web, mod.is_web_target(_web) is True)
+for _noweb in ("anki:search:tag:唐诗", "tag:唐诗", "唐诗", "国际法.渊源", "   ", ""):
+    ok("P273 不像网址：%r" % _noweb, mod.is_web_target(_noweb) is False)
+eq("P274 裸域名补成 https", mod.web_url("www.baidu.com"), "https://www.baidu.com")
+eq("P275 //主机补成 https", mod.web_url("//cdn.example/x"), "https://cdn.example/x")
+eq("P276 全角冒号归一成半角", mod.normalize_target("https：//a.example"), "https://a.example")
+eq("P277 前后全角空格也去掉", mod.normalize_target("　唐诗 -> url　"), "唐诗 -> url")
+
+_links.clear()
+ok("P278 裸域名直接开系统浏览器", mod.open_knowledge("www.baidu.com") is True)
+eq("P279 打开时补上了 https", _links, ["https://www.baidu.com"])
+_links.clear()
+ok("P280 带路径的裸域名也行", mod.open_knowledge("baike.baidu.com/item/x") is True)
+eq("P281 跳的是补全后的地址", _links, ["https://baike.baidu.com/item/x"])
+_links.clear()
+fake_browser.searches.clear()
+ok("P282 anki: 搜索式还走卡片浏览器", mod.open_knowledge("anki:search:tag:唐诗") is True)
+eq("P283 搜索式没被当成网址", _links, [])
+eq("P284 搜索式原样搜", fake_browser.searches, ["tag:唐诗"])
+_links.clear()
+fake_browser.searches.clear()
+ok("P285 既不像网址也不像搜索式的裸词仍旧搜", mod.open_knowledge("唐诗") is True)
+eq("P286 裸词不会去开浏览器", _links, [])
+eq("P287 裸词搜的是它自己", fake_browser.searches, ["唐诗"])
+
+# ------------------------------------------------------------------ 1.1.10：技巧连格式一起搬
+_html_tip_notes = [
+    FakeTipNote(31, ["唐诗"], "题甲", "<b>先看选项</b><br>再想朝代&nbsp;"),
+]
+mw.col = FakeTipCol(_html_tip_notes)
+ed_tips.note.tags = ["唐诗"]
+_payload = mod.gather_tips(ed_tips)
+eq("P288 候选项带回字段原始 HTML", _payload["items"][0]["tip_html"], "<b>先看选项</b><br>再想朝代&nbsp;")
+eq("P289 判重/显示用的还是去标签文字", _payload["items"][0]["tip"], "先看选项\n再想朝代")
+
+mw.col = FakeTipCol([FakeTipNote(41, ["唐诗"], "题", "技" * 500)])
+_payload = mod.gather_tips(ed_tips)
+eq("P290 技巧不再截断到 400 字", len(_payload["items"][0]["tip"]), 500)
+
+# ------------------------------------------------------------------ 1.1.10：技巧改完同步到同技巧卡片
+_CHOICE_ID, _TF_ID, _CLOZE_ID = 9001, 9002, 9003
+
+
+class FakeSyncDB:
+    """只认插件那条按题型取笔记的查询。"""
+
+    def __init__(self, mids):
+        self.mids = mids
+        self.queries = []
+
+    def list(self, sql, *args):
+        self.queries.append((sql, args))
+        wanted = set(args)
+        return [nid for nid, mid in self.mids.items() if mid in wanted]
+
+
+class FakeSyncModels:
+    def __init__(self, ids):
+        self.ids = ids
+
+    def by_name(self, name):
+        if name in self.ids:
+            return {"name": name, "id": self.ids[name], "flds": []}
+        return None
+
+
+class FakeTfTipNote(FakeTipNote):
+    def __init__(self, nid, tags, question, tip):
+        super().__init__(nid, tags, question, tip)
+        # 判断题字段少一个「选项」：「解题技巧」落在 index 2
+        self.fields = [question, "", tip, "", ""]
+
+    def model(self):
+        return {
+            "name": mod.TF_NOTE_TYPE_NAME,
+            "flds": [{"name": n} for n in mod.TF_FIELD_NAMES],
+        }
+
+
+class FakeSyncCol:
+    def __init__(self, notes, ids, mids):
+        self.notes = notes
+        self.models = FakeSyncModels(ids)
+        self.db = FakeSyncDB(mids)
+        self.updated = []
+
+    def get_note(self, nid):
+        for n in self.notes:
+            if n.id == nid:
+                return n
+        raise KeyError(nid)
+
+    def update_note(self, note):
+        self.updated.append(note.id)
+
+
+_sync_notes = [
+    FakeTipNote(61, ["唐诗"], "题一", "<b>先看选项</b><br>再想朝代"),
+    FakeTipNote(62, ["唐诗"], "题二", "先看选项再想朝代"),
+    FakeTfTipNote(63, ["唐诗"], "题三", "先看选项 再想朝代"),
+    FakeTipNote(64, ["唐诗"], "题四", "别的技巧"),
+]
+_sync_col = FakeSyncCol(
+    _sync_notes,
+    {mod.CHOICE_NOTE_TYPE_NAME: _CHOICE_ID, mod.TF_NOTE_TYPE_NAME: _TF_ID, mod.CLOZE_NOTE_TYPE_NAME: _CLOZE_ID},
+    {61: _CHOICE_ID, 62: _CHOICE_ID, 63: _TF_ID, 64: _CLOZE_ID},
+)
+_saved_col = mw.col
+mw.col = _sync_col
+eq(
+    "P291 按文字（忽略格式）在全库找同技巧的卡",
+    mod.find_tip_notes(_sync_col, mod.tip_key("先看选项再想朝代")),
+    [61, 62, 63],
+)
+ok("P292 是按题型 id 直接查 notes 表", "from notes where mid in" in _sync_col.db.queries[0][0], _sync_col.db.queries[0][0])
+
+_sync_editor = FakeEditor()
+_sync_editor.note.id = 62
+_sync_editor.note.fields = ["题二", "", "", "先看选项，再想朝代", "", ""]
+_sync_result = mod.sync_tips(_sync_editor, "先看选项再想朝代")
+ok("P293 同步成功并报了几张", _sync_result.get("ok") is True, _sync_result)
+eq("P294 「含本卡」的张数算上自己", _sync_result.get("total"), 3)
+eq("P295 写出去的张数不含本卡", _sync_result.get("synced"), 2)
+eq(
+    "P296 写进去的是新 HTML（判断题写在自己的字段位）",
+    [_sync_notes[0].fields[3], _sync_notes[2].fields[2]],
+    ["先看选项，再想朝代"] * 2,
+)
+eq("P297 本卡自己不再重写", _sync_notes[1].fields[3], "先看选项再想朝代")
+eq("P298 只动了「解题技巧」一个字段", [_sync_notes[0].fields[0], _sync_notes[0].fields[1], _sync_notes[0].fields[2]], ["题一", "", ""])
+eq("P299 写回的是那两张", _sync_col.updated, [61, 63])
+eq("P300 不相干的卡不碰", _sync_notes[3].fields[3], "别的技巧")
+
+eq("P301 文字没变就不动", mod.sync_tips(_sync_editor, "先看选项，再想朝代").get("reason"), "unchanged")
+_sync_editor.note.fields[3] = "   "
+eq("P302 新内容为空时提示先填", mod.sync_tips(_sync_editor, "先看选项再想朝代").get("reason"), "empty")
+_sync_editor.note.fields[3] = "改过的新技巧"
+eq(
+    "P303 全库只有本卡这条时就别问了",
+    mod.sync_tips(_sync_editor, "只有我有这条技巧").get("reason"),
+    "only-self",
+)
+_saved_ask_user = mod.askUser
+mod.askUser = lambda *a, **k: False
+eq("P304 用户点「取消」就不写", mod.sync_tips(_sync_editor, "先看选项，再想朝代").get("reason"), "declined")
+mod.askUser = _saved_ask_user
+eq("P305 取消之后没动过别的卡", _sync_col.updated, [61, 63])
+_fresh_editor = FakeEditor()
+_fresh_editor.note.fields[3] = "全新技巧"
+eq("P306 新笔记（还没入库）不会瞎找", mod.sync_tips(_fresh_editor, "旧技巧ABC").get("reason"), "only-self")
+
+_sync_msg_editor = FakeEditor()
+_sync_msg_editor.note.id = 62
+_sync_msg_editor.note.fields = ["题二", "", "", "再改一版的技巧", "", ""]
+mod.on_editor_did_load_note(_sync_msg_editor)
+_sync_msg_editor.web.evals.clear()
+hooks["webview_did_receive_js_message"].run(
+    (False, None), "iq:editor:sync-tip:" + quote("先看选项，再想朝代"), _sync_msg_editor
+)
+_sync_js = _sync_msg_editor.web.evals[-1] if _sync_msg_editor.web.evals else ""
+ok("P307 编辑器消息会走同步并回推结果", "showSyncResult(" in _sync_js, _sync_js[:200])
+ok("P308 回推里带着张数", '"total": 3' in _sync_js, _sync_js[:200])
+mw.col = _saved_col
+
+# ------------------------------------------------------------------ 1.1.10：判断题默认真值「错」
+_default_nt = {"name": mod.TF_NOTE_TYPE_NAME, "flds": [{"name": n} for n in mod.TF_FIELD_NAMES]}
+_default_notes = [
+    FakeTfNote(701, "程序公开透明。", ""),
+    FakeTfNote(702, "秩序在刑事诉讼价值中居于核心地位。", ""),
+    FakeTfNote(703, "地球是圆的。<!--iq-tf:对-->", ""),
+    FakeTfNote(704, "", ""),
+]
+
+
+class FakeDefaultTfCol:
+    def __init__(self, notes, nt):
+        self.notes = notes
+        self.models = FakeTfModels(nt)
+        self.updated = []
+
+    def find_notes(self, query):
+        return [n.id for n in self.notes]
+
+    def get_note(self, nid):
+        for n in self.notes:
+            if n.id == nid:
+                return n
+        raise KeyError(nid)
+
+    def update_note(self, note):
+        self.updated.append(note.id)
+
+
+_saved_col3 = mw.col
+_default_col = FakeDefaultTfCol(_default_notes, _default_nt)
+mw.col = _default_col
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+eq("P309 启动体检给没设过的补两张", mod.default_tf_flags(), 2)
+ok("P310 补的是「错」（不勾 = 错）", mod.tf_marker_flag(_default_notes[0].fields[0]) == "错")
+ok("P311 原来题目内容还在", _default_notes[0].fields[0].startswith("程序公开透明。"))
+eq("P312 补完记进小账本", mod.load_tf_flags().get("701"), "错")
+ok("P313 已经有标记的不动", mod.tf_marker_flag(_default_notes[2].fields[0]) == "对")
+eq("P314 题目空着的不碰", _default_notes[3].fields[0], "")
+eq("P315 幂等：再跑一次补 0 张", mod.default_tf_flags(), 0)
+eq("P316 只写了该写的那两张", _default_col.updated, [701, 702])
+
+_report_notes = [FakeTfNote(711, "又一张没设过的。", "")]
+mw.col = FakeDefaultTfCol(_report_notes, _default_nt)
+_report = mod.migrate_answer_fields()
+eq("P317 字段整理报告里带上补了几张", _report.get("tf_defaulted"), 1)
+eq("P318 补完的报告写进 migration.json", mod.MIGRATION_REPORT_PATH.exists(), True)
+mw.col = _saved_col3
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+
+# 打开判断题编辑器：没标记也没账本 → 直接补「错」（不用先点一下勾选框）
+_ed_tf_default = FakeEditor(mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES)
+_ed_tf_default.note.id = 801
+_ed_tf_default.note.fields = ["太阳从西边升起。", "", "", "", ""]
+mod.on_editor_did_load_note(_ed_tf_default)
+ok("P319 打开编辑器就补上默认「错」", mod.tf_marker_flag(_ed_tf_default.note.fields[0]) == "错", _ed_tf_default.note.fields[0])
+eq("P320 顺手记进小账本", mod.load_tf_flags().get("801"), "错")
+_ed_tf_marked = FakeEditor(mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES)
+_ed_tf_marked.note.fields = ["题干<!--iq-tf:对-->", "", "", "", ""]
+mod.on_editor_did_load_note(_ed_tf_marked)
+eq("P321 已经有标记的不动", _ed_tf_marked.note.fields[0], "题干<!--iq-tf:对-->")
+_ed_tf_empty = FakeEditor(mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES)
+_ed_tf_empty.note.fields = ["", "", "", "", ""]
+mod.on_editor_did_load_note(_ed_tf_empty)
+eq("P322 还没写题目就先不补（免得多一张空题卡）", _ed_tf_empty.note.fields[0], "")
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+
+# ------------------------------------------------------------------ 1.1.11：只改格式也算改动（技巧同步）
+eq(
+    "P323 加了一个换行就算改动",
+    mod.tip_html_signature("先看选项<br>再想朝代") != mod.tip_html_signature("先看选项再想朝代"),
+    True,
+)
+eq(
+    "P324 加了一个空格就算改动",
+    mod.tip_html_signature("先看选项 再想朝代") != mod.tip_html_signature("先看选项再想朝代"),
+    True,
+)
+eq(
+    "P325 加了一个 &nbsp; 就算改动",
+    mod.tip_html_signature("先看选项&nbsp;再想朝代") != mod.tip_html_signature("先看选项再想朝代"),
+    True,
+)
+eq(
+    "P326 带格式签名把 <br> 的几种写法算成同一份",
+    mod.tip_html_signature("甲<br>乙"),
+    mod.tip_html_signature("甲<br/>乙"),
+)
+eq("P326b 空格的 <br /> 写法也一样", mod.tip_html_signature("甲<br />乙"), mod.tip_html_signature("甲<br>乙"))
+eq("P327 首尾空白不算改动", mod.tip_html_signature("  先看选项  "), mod.tip_html_signature("先看选项"))
+eq(
+    "P328 判重键仍旧忽略所有格式（换行/空格都不算）",
+    mod.tip_key(mod._html_to_text("先看选项<br>再想朝代").strip()),
+    mod.tip_key("先看选项 再想朝代"),
+)
+
+_fmt_notes = [
+    FakeTipNote(71, ["唐诗"], "题一", "先看选项再想朝代"),
+    FakeTipNote(72, ["唐诗"], "题二", "先看选项再想朝代"),
+]
+_fmt_col = FakeSyncCol(
+    _fmt_notes,
+    {
+        mod.CHOICE_NOTE_TYPE_NAME: _CHOICE_ID,
+        mod.TF_NOTE_TYPE_NAME: _TF_ID,
+        mod.CLOZE_NOTE_TYPE_NAME: _CLOZE_ID,
+    },
+    {71: _CHOICE_ID, 72: _CHOICE_ID},
+)
+_saved_col_fmt = mw.col
+mw.col = _fmt_col
+_fmt_editor = FakeEditor()
+_fmt_editor.note.id = 72
+_fmt_editor.note.fields = ["题二", "", "", "先看选项<br>再想朝代", "", ""]
+_fmt_result = mod.sync_tips(_fmt_editor, "先看选项再想朝代")
+ok("P329 只加了换行也能进同步流程（不再当成没改）", _fmt_result.get("ok") is True, _fmt_result)
+eq("P330 同一条技巧的那张卡也被写上新 HTML", _fmt_notes[0].fields[3], "先看选项<br>再想朝代")
+_fmt_editor.note.fields[3] = "先看选项 再想朝代"
+_fmt_result2 = mod.sync_tips(_fmt_editor, "先看选项再想朝代")
+ok("P331 只改空格那也是改动", _fmt_result2.get("ok") is True, _fmt_result2)
+eq("P332 只改空格也会同步出去", _fmt_notes[0].fields[3], "先看选项 再想朝代")
+_fmt_editor.note.fields[3] = "先看选项 再想朝代"
+eq(
+    "P333 内容和格式都没动还是 unchanged",
+    mod.sync_tips(_fmt_editor, "先看选项 再想朝代").get("reason"),
+    "unchanged",
+)
+mw.col = _saved_col_fmt
+
+# ------------------------------------------------------------------ 1.1.11：新卡保存时补判断题默认真值「错」
+class FakeAddNote:
+    """「添加卡片」窗口里刚保存的笔记。"""
+
+    def __init__(self, nid, model_name, field_names, values):
+        self.id = nid
+        self._model = {"name": model_name, "flds": [{"name": n} for n in field_names]}
+        self.fields = list(values)
+
+    def model(self):
+        return self._model
+
+
+class FakeAddCol:
+    def __init__(self):
+        self.updated = []
+
+    def update_note(self, note):
+        self.updated.append(note.id)
+
+
+_saved_col_add = mw.col
+_add_col = FakeAddCol()
+mw.col = _add_col
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+
+_new_tf = FakeAddNote(901, mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES, ["新写的题", "", "", "", ""])
+hooks["add_cards_did_add_note"].run(_new_tf)
+ok("P334 新卡保存后自动补上默认「错」", mod.tf_marker_flag(_new_tf.fields[0]) == "错", _new_tf.fields[0])
+ok("P335 题目原文还在", _new_tf.fields[0].startswith("新写的题"), _new_tf.fields[0])
+eq("P336 顺手记进小账本", mod.load_tf_flags().get("901"), "错")
+eq("P337 只写了这一张", _add_col.updated, [901])
+
+_marked_tf = FakeAddNote(902, mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES, ["已有<!--iq-tf:对-->", "", "", "", ""])
+hooks["add_cards_did_add_note"].run(_marked_tf)
+eq("P338 已经有标记的不动", _marked_tf.fields[0], "已有<!--iq-tf:对-->")
+eq("P339 也没多写一次库", _add_col.updated, [901])
+
+_empty_tf = FakeAddNote(903, mod.TF_NOTE_TYPE_NAME, mod.TF_FIELD_NAMES, ["", "", "", "", ""])
+hooks["add_cards_did_add_note"].run(_empty_tf)
+eq("P340 题目空着的不碰（不凭空造空题卡）", _empty_tf.fields[0], "")
+eq("P341 空题不写库", _add_col.updated, [901])
+
+_choice_add = FakeAddNote(
+    904, mod.CHOICE_NOTE_TYPE_NAME, mod.CHOICE_FIELD_NAMES, ["选择题干", "", "", "", "", ""]
+)
+hooks["add_cards_did_add_note"].run(_choice_add)
+eq("P342 别的题型不插手", _choice_add.fields[0], "选择题干")
+eq("P343 别人的卡一点没动", _add_col.updated, [901])
+
+
+class FakeBadNote:
+    id = 905
+    fields = ["boom"]
+
+    def model(self):
+        raise RuntimeError("拿不到题型")
+
+
+hooks["add_cards_did_add_note"].run(FakeBadNote())
+ok("P344 钩子里出错也绝不挡着加卡", True)
+mw.col = _saved_col_add
+try:
+    mod.TF_FLAGS_PATH.unlink()
+except Exception:
+    pass
+
+# ------------------------------------------------------------------ 1.1.11：从剪贴板读真网址
+_board = qt.QApplication.clipboard()
+_board.setMime(FakeMime(html='<meta charset="utf-8"><a href="https://baike.baidu.com/item/tang">唐诗</a>'))
+eq("P345 从 html 里的 <a href> 取真网址", mod._clipboard_link(), "https://baike.baidu.com/item/tang")
+
+_board.setMime(
+    FakeMime(html='<a href="anki:search:tag:唐诗">唐诗</a>', urls=[FakeUrl("https://a.example/from-url")])
+)
+eq("P346 html 里的不是网址就往下看 uri-list", mod._clipboard_link(), "https://a.example/from-url")
+
+_board.setMime(FakeMime(urls=[FakeUrl("https://a.example/one"), FakeUrl("https://a.example/two")]))
+eq("P347 uri-list 取第一条", mod._clipboard_link(), "https://a.example/one")
+
+_board.setMime(FakeMime(text="www.baidu.com"))
+eq("P348 纯文本自己就是网址也认（补协议留给打开时做）", mod._clipboard_link(), "www.baidu.com")
+
+_board.setMime(FakeMime(text="唐诗"))
+eq("P349 纯文本不是网址就不当链接", mod._clipboard_link(), "")
+
+_board.setMime(FakeMime())
+eq("P350 剪贴板里什么都没有就给空", mod._clipboard_link(), "")
+
+_board.setMime(None)
+eq("P351 连 mimeData 都拿不到也给空", mod._clipboard_link(), "")
+
+_ed_clip = FakeEditor()
+_ed_clip.web.evals.clear()
+_board.setMime(FakeMime(text="https://a.example/x"))
+hooks["webview_did_receive_js_message"].run((False, None), "iq:editor:clip:2", _ed_clip)
+_clip_js = _ed_clip.web.evals[-1] if _ed_clip.web.evals else ""
+ok("P352 「📋 读链接」消息把网址推回编辑器", "applyClipboard(" in _clip_js, _clip_js[:200])
+ok("P353 推回时带上那一行的序号", "https://a.example/x" in _clip_js and ", 2)" in _clip_js, _clip_js[:200])
+_board.setMime(None)
 
 print("\n".join(results))
 print("----")

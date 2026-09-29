@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成 答题反馈预览-1.1.7.html（就在本脚本旁边）。
+"""生成 答题反馈预览-1.1.11.html（就在本脚本旁边）。
 
 把真实的 assets/quiz.js + assets/quiz.css 塞进几个 iframe（每个 iframe 就是一张真卡片的
 DOM 结构），再让每个 iframe 自己跑一小段「演示脚本」把卡片点到答完的状态，这样在浏览器里
@@ -15,7 +15,7 @@ from pathlib import Path
 # 脚本自己所在目录 = 项目根目录（这样整个文件夹搬到哪都能跑）
 HERE = Path(__file__).resolve().parent
 SRC = HERE / "源码"
-OUT = HERE / "答题反馈预览-1.1.7.html"
+OUT = HERE / "答题反馈预览-1.1.11.html"
 
 CSS = (SRC / "assets" / "quiz.css").read_text(encoding="utf-8")
 JS = (SRC / "assets" / "quiz.js").read_text(encoding="utf-8")
@@ -82,8 +82,8 @@ CHOICE_OPTS = "*A. 李白<br>B. 杜甫<br>C. 白居易"
 CHOICE_EXP = "李白，字太白，唐代诗人。"
 CHOICE_TIPS = "先想朝代，再想代表诗人。"
 CHOICE_KNOWLEDGE = (
-    "唐诗 -> https://zh.wikipedia.org/wiki/静夜思\n"
-    "宋词 -> https://zh.wikipedia.org/wiki/宋词"
+    "古典诗词::唐诗 -> https://zh.wikipedia.org/wiki/静夜思\n"
+    "古典诗词::宋词 -> https://zh.wikipedia.org/wiki/宋词"
 )
 
 TF_Q = "地球是圆的"
@@ -140,6 +140,18 @@ CARDS = [
         "demo": "",
     },
     {
+        "title": "判断题 · 新卡没真值标记（卡片端按「错」兜底）",
+        "hint": "这是 1.1.11 的兜底：题目里没有 <!--iq-tf:--> 标记时，卡片端按「不勾 = 错」直接出「正确 / 错误」两个按钮，不用先自己点一次。（点「错误」应判对、该项变绿）",
+        "html": card("front", TF_Q, question_raw=TF_Q, explanation="这是常识。"),
+        "demo": demo(CLICK % 1),
+    },
+    {
+        "title": "判断题 · 新卡没真值标记（背面）",
+        "hint": "同上那张卡的答案面：没有标记也照常着色。",
+        "html": card("back", TF_Q, question_raw=TF_Q, explanation="这是常识。"),
+        "demo": "",
+    },
+    {
         "title": "填空题 · 答错",
         "hint": "空里先划掉你填的（红），再跟标准答案（绿）：南京 → 北京。反馈区没有答案那一行。",
         "html": card("front", CLOZE_Q, explanation="首都 = 北京；最大城市 = 上海。", cloze=True),
@@ -154,7 +166,8 @@ CARDS = [
     {
         "title": "选择题 · 答对（相关知识点 = 可点的标签）",
         "hint": "「知识点」不再是单独一个大按钮，而是一排标签：点哪个标签就跳哪个链接。"
-        "制卡时在「知识点」里一行写一条「标签 -> 链接」，编辑器里点 [🏷 配置标签链接] 逐行填也行。",
+        "制卡时在「知识点」里一行写一条「标签 -> 链接」，编辑器里点 [🏷 配置标签链接] 逐行填也行。"
+        "标签写成「父::子」这种完整路径时，卡片上只显示末级的「子」，鼠标悬停看得到完整路径，点击仍按完整路径跳转。",
         "html": card(
             "front",
             CHOICE_Q,
@@ -171,7 +184,7 @@ PAGE = """<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>互动答题卡 1.1.7 · 答完效果预览</title>
+<title>互动答题卡 1.1.11 · 答完效果预览</title>
 <style>
   :root { color-scheme: light; }
   body {
@@ -192,7 +205,7 @@ PAGE = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>互动答题卡 1.1.7 · 答完效果预览</h1>
+<h1>互动答题卡 1.1.11 · 答完效果预览</h1>
 <p class="lead">这一页用的是插件里那份真实的 <code>quiz.js</code> / <code>quiz.css</code>，每格是一张真卡片
 （iframe 里自动帮你点成「已答完」的样子）。<b>选择题 / 判断题只看颜色，填空题把标准答案写进空里。</b></p>
 <div class="grid" id="grid"></div>
